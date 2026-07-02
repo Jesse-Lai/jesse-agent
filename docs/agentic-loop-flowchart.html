@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Code - Agentic Loop 流程图</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            padding: 40px 20px;
+            min-height: 100vh;
+        }
+        h1 {
+            text-align: center;
+            font-size: 28px;
+            margin-bottom: 10px;
+            color: #58a6ff;
+        }
+        .subtitle {
+            text-align: center;
+            color: #8b949e;
+            margin-bottom: 40px;
+            font-size: 14px;
+        }
+        .flowchart {
+            max-width: 800px;
+            margin: 0 auto;
+            position: relative;
+        }
+        /* Nodes */
+        .node {
+            position: relative;
+            margin: 0 auto;
+            text-align: center;
+            padding: 16px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            width: fit-content;
+            min-width: 200px;
+            max-width: 400px;
+        }
+        .node-start {
+            background: #1f6feb;
+            border: 2px solid #58a6ff;
+            border-radius: 30px;
+        }
+        .node-process {
+            background: #161b22;
+            border: 2px solid #30363d;
+        }
+        .node-decision {
+            background: #161b22;
+            border: 2px solid #f0883e;
+            transform: rotate(0deg);
+            border-radius: 8px;
+            padding: 12px 20px;
+        }
+        .node-decision::before {
+            content: '⟡';
+            position: absolute;
+            left: -8px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #f0883e;
+            font-size: 16px;
+        }
+        .node-action {
+            background: #1c2d1c;
+            border: 2px solid #3fb950;
+        }
+        .node-end {
+            background: #2d1c2d;
+            border: 2px solid #bc8cff;
+            border-radius: 30px;
+        }
+        .node-error {
+            background: #2d1c1c;
+            border: 2px solid #f85149;
+        }
+        /* Arrows */
+        .arrow {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 40px;
+            position: relative;
+        }
+        .arrow::after {
+            content: '';
+            width: 2px;
+            height: 100%;
+            background: #30363d;
+            position: absolute;
+        }
+        .arrow-label {
+            background: #0d1117;
+            padding: 2px 8px;
+            font-size: 11px;
+            color: #8b949e;
+            z-index: 1;
+            border-radius: 4px;
+        }
+        .arrow-yes {
+            color: #3fb950;
+        }
+        .arrow-no {
+            color: #f85149;
+        }
+        /* Loop indicator */
+        .loop-container {
+            border: 2px dashed #f0883e;
+            border-radius: 16px;
+            padding: 30px 20px;
+            margin: 20px 0;
+            position: relative;
+        }
+        .loop-label {
+            position: absolute;
+            top: -12px;
+            left: 20px;
+            background: #0d1117;
+            padding: 0 10px;
+            color: #f0883e;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        /* Step numbers */
+        .step-num {
+            position: absolute;
+            left: -35px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 24px;
+            height: 24px;
+            background: #30363d;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: #8b949e;
+        }
+        /* Details */
+        .detail {
+            font-size: 11px;
+            color: #8b949e;
+            margin-top: 4px;
+        }
+        .file-ref {
+            font-size: 11px;
+            color: #58a6ff;
+            font-family: 'SF Mono', Monaco, monospace;
+            margin-top: 4px;
+        }
+        /* Branch layout */
+        .branch {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin: 10px 0;
+        }
+        .branch-item {
+            flex: 1;
+            max-width: 300px;
+        }
+        .branch-item .node {
+            width: 100%;
+        }
+        /* Side annotation */
+        .annotation {
+            position: absolute;
+            right: -220px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 200px;
+            font-size: 11px;
+            color: #8b949e;
+            border-left: 2px solid #21262d;
+            padding-left: 12px;
+        }
+        /* Loop back arrow */
+        .loop-back {
+            position: absolute;
+            right: -15px;
+            top: 20%;
+            bottom: 20%;
+            width: 30px;
+            border: 2px solid #f0883e;
+            border-left: none;
+            border-radius: 0 12px 12px 0;
+        }
+        .loop-back::after {
+            content: '↑';
+            position: absolute;
+            top: -5px;
+            left: -7px;
+            color: #f0883e;
+            font-size: 16px;
+        }
+        /* Section dividers */
+        .section {
+            margin: 30px 0 15px;
+            padding: 8px 16px;
+            background: #161b22;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #8b949e;
+            text-align: center;
+            border: 1px solid #21262d;
+        }
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 40px;
+            padding: 20px;
+            border: 1px solid #21262d;
+            border-radius: 12px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+        /* Responsive */
+        @media (max-width: 600px) {
+            .annotation { display: none; }
+            .step-num { display: none; }
+            .branch { flex-direction: column; align-items: center; }
+        }
+    </style>
+</head>
+<body>
+    <h1>🔄 Claude Code Agentic Loop</h1>
+    <p class="subtitle">基于 src/query.ts + src/services/tools/toolOrchestration.ts 的逆向分析</p>
+
+    <div class="flowchart">
+        <!-- Start -->
+        <div class="node node-start">
+            👤 用户输入消息
+            <div class="file-ref">QueryEngine.ts → processUserInput()</div>
+        </div>
+
+        <div class="arrow"><span class="arrow-label">messages[]</span></div>
+
+        <!-- Context Assembly -->
+        <div class="node node-process" style="position: relative;">
+            <span class="step-num">1</span>
+            📋 组装上下文
+            <div class="detail">System Prompt + 对话历史 + Tool 定义 + 记忆</div>
+            <div class="file-ref">queryContext.ts → fetchSystemPromptParts()</div>
+        </div>
+
+        <div class="arrow"><span class="arrow-label">完整 context</span></div>
+
+        <!-- Loop Start -->
+        <div class="loop-container">
+            <span class="loop-label">⟳ AGENTIC LOOP（while 循环）</span>
+            <div class="loop-back"></div>
+
+            <!-- Call LLM -->
+            <div class="node node-process" style="position: relative;">
+                <span class="step-num">2</span>
+                🧠 调用 LLM（Anthropic API）
+                <div class="detail">发送 messages + tools → 流式接收响应</div>
+                <div class="file-ref">services/api/claude.ts</div>
+            </div>
+
+            <div class="arrow"><span class="arrow-label">response stream</span></div>
+
+            <!-- Streaming Tool Executor -->
+            <div class="node node-process" style="position: relative;">
+                <span class="step-num">3</span>
+                📡 StreamingToolExecutor 解析响应
+                <div class="detail">边接收边解析：text blocks / tool_use blocks / thinking blocks</div>
+                <div class="file-ref">StreamingToolExecutor.ts</div>
+            </div>
+
+            <div class="arrow"></div>
+
+            <!-- Decision: has tool calls? -->
+            <div class="node node-decision" style="position: relative;">
+                <span class="step-num">4</span>
+                响应包含 tool_use？
+            </div>
+
+            <div class="arrow"><span class="arrow-label arrow-no">❌ 否 — 纯文本回复</span></div>
+
+            <!-- End path -->
+            <div class="node node-end" style="margin-bottom: 30px;">
+                ✅ 结束循环，返回文本给用户
+                <div class="detail">stop_reason = "end_turn"</div>
+            </div>
+
+            <div class="section">↓ 如果有 tool_use ↓</div>
+
+            <!-- Tool Orchestration -->
+            <div class="node node-process" style="position: relative;">
+                <span class="step-num">5</span>
+                🔀 Tool 编排（partitionToolCalls）
+                <div class="detail">分组：read-only 的并行执行，write 的串行执行</div>
+                <div class="file-ref">toolOrchestration.ts → partitionToolCalls()</div>
+            </div>
+
+            <div class="arrow"></div>
+
+            <!-- Permission Check -->
+            <div class="node node-decision" style="position: relative;">
+                <span class="step-num">6</span>
+                需要用户确认？（权限检查）
+                <div class="detail">bashPermissions / pathValidation</div>
+            </div>
+
+            <div class="branch">
+                <div class="branch-item">
+                    <div class="node node-action">
+                        ✅ 允许 → 执行 Tool
+                        <div class="detail">tool.execute(args) → result</div>
+                        <div class="file-ref">toolExecution.ts → runToolUse()</div>
+                    </div>
+                </div>
+                <div class="branch-item">
+                    <div class="node node-error">
+                        ❌ 拒绝 → 返回错误
+                        <div class="detail">result = "用户拒绝了此操作"</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="arrow"><span class="arrow-label">tool_result</span></div>
+
+            <!-- Append to messages -->
+            <div class="node node-process" style="position: relative;">
+                <span class="step-num">7</span>
+                📝 结果追加到 messages[]
+                <div class="detail">{ role: "tool", tool_use_id: "...", content: result }</div>
+            </div>
+
+            <div class="arrow"></div>
+
+            <!-- Token check -->
+            <div class="node node-decision" style="position: relative;">
+                <span class="step-num">8</span>
+                上下文超 token 限制？
+            </div>
+
+            <div class="branch">
+                <div class="branch-item">
+                    <div class="node node-process">
+                        ⚠️ 是 → Auto Compact
+                        <div class="detail">压缩旧对话，保留最近内容</div>
+                        <div class="file-ref">compact/autoCompact.ts</div>
+                    </div>
+                </div>
+                <div class="branch-item">
+                    <div class="node node-action">
+                        ✅ 否 → 继续
+                    </div>
+                </div>
+            </div>
+
+            <div class="arrow"><span class="arrow-label arrow-yes">↩️ 回到步骤 2，继续循环</span></div>
+
+            <!-- Max iterations -->
+            <div class="node node-error" style="margin-top: 10px;">
+                🛑 安全阀：超过 max iterations → 强制结束
+                <div class="detail">MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3</div>
+            </div>
+        </div>
+
+        <!-- Post-loop -->
+        <div class="arrow"><span class="arrow-label">loop 结束后</span></div>
+
+        <div class="node node-process">
+            💾 后处理
+            <div class="detail">保存对话历史 / 提取记忆 / 更新 session / token 统计</div>
+            <div class="file-ref">sessionStorage.ts / extractMemories.ts</div>
+        </div>
+
+        <div class="arrow"></div>
+
+        <div class="node node-end">
+            👤 用户看到最终回复
+        </div>
+
+        <!-- Legend -->
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-dot" style="background: #1f6feb;"></div>
+                入口/出口
+            </div>
+            <div class="legend-item">
+                <div class="legend-dot" style="background: #30363d; border: 1px solid #8b949e;"></div>
+                处理步骤
+            </div>
+            <div class="legend-item">
+                <div class="legend-dot" style="background: #f0883e;"></div>
+                判断/决策
+            </div>
+            <div class="legend-item">
+                <div class="legend-dot" style="background: #3fb950;"></div>
+                执行动作
+            </div>
+            <div class="legend-item">
+                <div class="legend-dot" style="background: #f85149;"></div>
+                错误/拒绝
+            </div>
+            <div class="legend-item">
+                <div class="legend-dot" style="background: #bc8cff;"></div>
+                结束
+            </div>
+        </div>
+
+        <!-- Summary -->
+        <div style="margin-top: 40px; padding: 24px; background: #161b22; border-radius: 12px; border: 1px solid #21262d;">
+            <h3 style="color: #58a6ff; margin-bottom: 12px;">💡 核心理解</h3>
+            <ul style="list-style: none; line-height: 2;">
+                <li>1️⃣ <strong>Loop 只有两个出口：</strong>LLM 回复纯文本（正常结束）或达到 max iterations（强制结束）</li>
+                <li>2️⃣ <strong>Tool 执行是 loop 的唯一分支：</strong>有 tool_call → 执行 → 结果喂回 → 继续；没有 → 结束</li>
+                <li>3️⃣ <strong>并行优化：</strong>read-only 的 tool（如 FileRead、Glob）可以并行，write 的（如 Bash、FileEdit）必须串行</li>
+                <li>4️⃣ <strong>安全检查在执行前：</strong>不是所有 tool call 都会被执行，权限检查可以拦截</li>
+                <li>5️⃣ <strong>Auto-compact 是透明的：</strong>用户感知不到，但确保 loop 不会因为 token 溢出而崩溃</li>
+            </ul>
+        </div>
+
+        <!-- jesse-agent mapping -->
+        <div style="margin-top: 20px; padding: 24px; background: #1c2d1c; border-radius: 12px; border: 1px solid #3fb950;">
+            <h3 style="color: #3fb950; margin-bottom: 12px;">🛠️ 对应到 jesse-agent 的简化版</h3>
+            <pre style="color: #e6edf3; font-size: 13px; line-height: 1.6; overflow-x: auto;">
+// jesse-agent/src/loop.ts — 核心就这么多
+async function agentLoop(userMessage: string, messages: Message[]) {
+  messages.push({ role: "user", content: userMessage })
+
+  while (true) {
+    // Step 2: 调 LLM
+    const response = await callLLM(messages, tools)
+
+    // Step 4: 判断
+    if (response.type === "text") {
+      console.log(response.content)  // 结束
+      break
+    }
+
+    // Step 5-7: 执行 tool，结果喂回
+    for (const toolCall of response.toolCalls) {
+      const result = await executeTool(toolCall.name, toolCall.args)
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: result
+      })
+    }
+
+    // Step 8: 安全阀
+    if (messages.length > MAX_ITERATIONS) break
+  }
+}
+            </pre>
+            <p style="color: #8b949e; font-size: 12px; margin-top: 8px;">
+                Claude Code 的 2000+ 行 query.ts 做的事，核心逻辑就这 20 行。其余都是生产级优化。
+            </p>
+        </div>
+    </div>
+</body>
+</html>
