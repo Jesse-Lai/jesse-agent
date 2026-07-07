@@ -1,0 +1,38 @@
+{
+  // TypeScript compiler configuration.
+  // Goal: strict, modern ESM setup that catches bugs early while we learn.
+  "compilerOptions": {
+    // --- Output target ---
+    // Compile to modern JS (Node 22 supports ES2023 natively). No downleveling
+    // needed, so the emitted code stays close to what we write.
+    "target": "ES2023",
+    "lib": ["ES2023"],
+
+    // --- Module system (ESM) ---
+    // "NodeNext" makes TS follow Node's real ESM rules: relative imports must
+    // end in `.js` (even though the source file is `.ts`). This is the one ESM
+    // quirk we accepted; it keeps runtime and type-checking behavior identical.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    // --- Strictness (the whole point of using TS) ---
+    // Turn on every safety check. Better to fight the compiler now than debug
+    // undefined-at-runtime later.
+    "strict": true,
+    "noUncheckedIndexedAccess": true, // arr[i] is T | undefined — forces us to handle missing elements
+    "noImplicitOverride": true,
+
+    // --- Interop & ergonomics ---
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true, // don't type-check node_modules .d.ts — faster builds
+
+    // --- Build output (only used by `npm run build`; dev uses tsx directly) ---
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

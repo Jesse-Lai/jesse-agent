@@ -1,0 +1,29 @@
+{
+  "name": "jesse-agent",
+  "version": "0.1.0",
+  "description": "A personal AI agent built from scratch in TypeScript. No frameworks, no SDK — a hand-written agentic loop, learned by reverse-engineering Claude Code.",
+  "private": true,
+
+  "//type": "ESM module system (chosen over CommonJS). Lets us write `import ... from './x.js'`, use top-level await, and matches Claude Code's source + a future web target.",
+  "type": "module",
+
+  "//scripts": "dev runs TS directly via tsx (no build step, fast feedback while learning). build/start are for later when we ship compiled JS.",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+
+  "//engines": "Node 20.6+ required: that's when Node gained stable built-in .env loading and mature ESM support. We're on v22.",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+
+  "//devDependencies": "ZERO runtime deps by design — the agent core uses only Node built-ins (fetch, readline). These three are dev-only tooling: the TS compiler, the TS runner, and Node's type definitions.",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
