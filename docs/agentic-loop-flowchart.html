@@ -347,9 +347,9 @@
     <div class="progress-wrap">
         <div class="progress-head">
             <span class="label">🛠️ jesse-agent 逆向搭建进度</span>
-            <span class="count">Step 3 / 22 · Phase 1 ✅</span>
+            <span class="count">Step 6.5 / 22 · Phase 2 ✅</span>
         </div>
-        <div class="progress-bar"><span style="width: 14%;"></span></div>
+        <div class="progress-bar"><span style="width: 30%;"></span></div>
         <div class="progress-note">
             这张图既是 Claude Code 的运行原理，也是我们的<b>搭建蓝图</b>。每完成一个 Step 就点亮对应节点：
             <b>✅ 已建</b> ·  <b>🔨 在建（呼吸灯）</b> · 暗灰 = 未建。搭到最后，整张图全亮 = agent 建成。
@@ -423,22 +423,22 @@
             <div class="section">↓ 如果有 tool_use ↓</div>
 
             <!-- Tool Orchestration -->
-            <div class="node node-process" data-status="todo" style="position: relative;">
+            <div class="node node-process" data-status="done" style="position: relative;">
                 <span class="step-num">5</span>
                 🔀 Tool 编排（partitionToolCalls）
                 <div class="detail">分组：read-only 的并行执行，write 的串行执行</div>
                 <div class="file-ref">toolOrchestration.ts → partitionToolCalls()</div>
-                <span class="step-tag">Step 5-6 · 工具系统</span>
+                <span class="step-tag">Step 4-6 · 工具契约+注册表+管线（已建 ✅）</span>
             </div>
 
             <div class="arrow"></div>
 
             <!-- Permission Check -->
-            <div class="node node-decision" data-status="todo" style="position: relative;">
+            <div class="node node-decision" data-status="done" style="position: relative;">
                 <span class="step-num">6</span>
                 需要用户确认？（权限检查）
                 <div class="detail">bashPermissions / pathValidation</div>
-                <span class="step-tag">Step 6.5 · Human-in-the-Loop 🔒</span>
+                <span class="step-tag">Step 6.5 · Human-in-the-Loop 🔒（已建 ✅）</span>
             </div>
 
             <div class="branch">
