@@ -16,7 +16,30 @@
 
 import { createInterface } from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
-import { callLLM, type Message } from './llm.js'
+import type { Message } from './llm.js'
+import { runAgent } from './loop.js'
+
+// ============================================================================
+// 〇、可观测性开关（Step 8.5）：--verbose 或 DEBUG=1 打开"仪表盘"
+// ============================================================================
+//
+// agentic loop 默认是黑盒——你只看到最终答案，看不到中间它"为什么选这个工具"。
+// verbose 模式把每一轮的内部决策打印出来（第几轮、模型决定说话还是调工具、
+// 结果如何），像给闷头转的引擎装块仪表盘。
+//
+// 两种打开方式（对应 PLAN Step 8.5 的 "--verbose / DEBUG 开关"）：
+//   npm run dev -- --verbose      ← 命令行参数
+//   DEBUG=1 npm run dev           ← 环境变量
+//
+// 承重原则的体现：所有日志都写在这里（事件消费方），loop 只负责 yield 事件、
+// 一行都不打印。verbose 只是"把已有事件显示得更详细"，核心引擎毫不知情。
+const VERBOSE =
+  process.argv.includes('--verbose') || process.env.DEBUG === '1'
+
+/** verbose 日志：只在开关打开时打印，用灰色 + [verbose] 前缀和正常输出区分。 */
+function vlog(line: string): void {
+  if (VERBOSE) console.log(`\x1b[90m  [verbose] ${line}\x1b[0m`)
+}
 
 // ============================================================================
 // 一、对话历史（存在内存里）
@@ -42,8 +65,10 @@ async function main(): Promise<void> {
   const rl = createInterface({ input: stdin, output: stdout })
 
   // 开场白 + 用法提示。
-  console.log('🤖 Jesse-Agent（Phase 1：能对话）')
-  console.log('   输入你的问题开始聊天；输入 exit 或按 Ctrl+C 退出。\n')
+  console.log('🤖 Jesse-Agent（Phase 3：能自主调工具）')
+  console.log('   输入你的问题开始聊天；输入 exit 或按 Ctrl+C 退出。')
+  if (VERBOSE) console.log('   🔍 verbose 已开启：会打印每一轮的内部决策。')
+  console.log()
 
   // 这就是 REPL 的 Loop：一个不断读输入的循环。
   while (true) {
@@ -71,23 +96,41 @@ async function main(): Promise<void> {
     // 把用户这句话追加进历史（模型要看到完整上下文才能接话）。
     messages.push({ role: 'user', content: input })
 
-    // ---- Eval：问模型 ----
+    // ---- Eval：交给 agentic loop，消费它吐出的事件流 ----
+    // 核心与界面解耦：loop 只产生事件，index.ts（界面）负责把每种事件显示成
+    // 终端文字。将来换成 Web/Mac，只需换这段显示逻辑，loop 一行不动。
     try {
-      const response = await callLLM(messages)
-
-      // Phase 1 里模型只会走 'text' 分支（还没有工具）。
-      // 'tool_calls' 分支等 Phase 3 接入 loop 后才会触发。
-      if (response.type === 'text') {
-        // ---- Print：打印回复 ----
-        console.log(`\n助手 › ${response.text}\n`)
-        // 把模型的回复也存进历史，这样下一轮它记得自己说过啥。
-        messages.push(response.raw)
-      } else {
-        // 防御性提示：Phase 1 不该走到这里。
-        console.log('\n[提示] 模型请求调用工具，但工具系统还没搭（Phase 2/3）。\n')
+      for await (const event of runAgent(messages)) {
+        switch (event.type) {
+          case 'turn_start':
+            // 仅 verbose：画一条轮次分隔线，让你看清 loop 转了几圈。
+            vlog(`──────── 第 ${event.turn} 轮 ────────`)
+            break
+          case 'assistant_text':
+            vlog('💬 模型决定：直接用文本回答 → 本轮对话结束')
+            console.log(`\n助手 › ${event.text}\n`)
+            break
+          case 'tool_start':
+            vlog(`🤔 模型决定：调用工具 ${event.name}，参数=${JSON.stringify(event.args)}`)
+            console.log(`  🔧 调用工具 ${event.name}(${JSON.stringify(event.args)})`)
+            break
+          case 'tool_result': {
+            const preview =
+              event.content.length > 200
+                ? event.content.slice(0, 200) + '…'
+                : event.content
+            console.log(`  ${event.ok ? '✓' : '✗'} ${preview}`)
+            vlog(
+              `📥 工具结果已回传给模型（${event.ok ? '成功' : '失败'}，共 ${event.content.length} 字），下一轮它会据此决策`,
+            )
+            break
+          }
+          case 'max_turns':
+            console.log('\n[提示] 达到最大轮次，已强制结束本轮。\n')
+            break
+        }
       }
     } catch (err) {
-      // 单次调用失败不该让整个程序崩溃——报个错，继续下一轮。
       console.error(`\n[出错] ${String(err)}\n`)
     }
     // ---- Loop：回到 while 顶部，继续等下一句 ----

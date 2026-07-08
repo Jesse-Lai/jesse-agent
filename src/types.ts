@@ -47,6 +47,9 @@ export interface JSONSchema {
   type: 'object'
   properties: Record<string, JSONSchemaProperty>
   required?: string[]
+  // 索引签名：让 JSONSchema 兼容 llm.ts 里更宽松的 Record<string, unknown>，
+  // 这样工具定义能直接传给 callLLM，不用做类型转换。
+  [key: string]: unknown
 }
 
 /** 单个参数的描述：类型 + 给模型看的说明。 */
