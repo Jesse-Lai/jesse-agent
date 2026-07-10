@@ -18,6 +18,7 @@ import { createInterface } from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
 import type { Message } from './llm.js'
 import { runAgent } from './loop.js'
+import { buildSystemPrompt } from './prompt.js'
 
 // ============================================================================
 // 〇、可观测性开关（Step 8.5）：--verbose 或 DEBUG=1 打开"仪表盘"
@@ -48,11 +49,12 @@ function vlog(line: string): void {
 // Phase 1 的决定：历史就是一个内存数组，退出即忘。
 // "重启还记得" 是 Phase 5（持久化）的事，现在做属于跳步。
 //
-// 第一条 system 消息给模型设定身份。这是最简版，正式的系统提示是 Step 9。
+// 第一条 system 消息给模型设定身份和行为守则。Step 9 已把它抽到 prompt.ts，
+// 结构参照 Claude Code（分段 + 静态/动态），启动时组装一次。
 const messages: Message[] = [
   {
     role: 'system',
-    content: '你是 Jesse 的个人 AI 助手，用简洁友好的中文回答。',
+    content: buildSystemPrompt(),
   },
 ]
 

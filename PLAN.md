@@ -8,7 +8,7 @@ Jesse is building a personal AI agent from scratch to:
 3. **Eventually** evolve into a multi-platform agent (iOS app, desktop, WeChat)
 
 ### Reverse-Engineering Approach
-This project doubles as a **clean-room reverse-engineering** study of Claude Code (leaked source studied for reference at `session-state/.../ref-claude-code`). We study its *architecture and design intent* — never copy its proprietary code — and rebuild an original, equivalent core ourselves.
+This project doubles as a **clean-room reverse-engineering** study of Claude Code (leaked source studied for reference at `session-state/.../ref-claude-code`). We study its *architecture and design intent* and rebuild an original, equivalent core ourselves.
 - **What we rebuild:** the agent *core* — the agentic loop (`query.ts`), the tool contract (`Tool.ts`), and the tool-execution pipeline (`toolExecution.ts`). This is only ~a few thousand lines and IS the essence of Claude Code.
 - **What we deliberately skip (for now):** the ~500k lines of Ink/React TUI polish, IDE bridge, telemetry, OAuth, enterprise features. Those are productization, not "the agent".
 - **End state:** a "Claude Code-class" original agent — same core capabilities (autonomous loop, tools, permissions, memory, sub-agents) — that can later be wrapped in different products (Web, Mac) because the core is UI-agnostic.
