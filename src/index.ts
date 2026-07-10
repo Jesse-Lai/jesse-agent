@@ -127,6 +127,9 @@ async function main(): Promise<void> {
             )
             break
           }
+          case 'error':
+            console.log(`\n[出错] ${event.reason}\n`)
+            break
           case 'max_turns':
             console.log('\n[提示] 达到最大轮次，已强制结束本轮。\n')
             break

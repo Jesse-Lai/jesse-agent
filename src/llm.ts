@@ -93,6 +93,9 @@ export interface CallOptions {
 /** 遇到限流(429)或服务端错误(5xx)时，最多重试几次。 */
 const MAX_RETRIES = 3
 
+/** 单次请求的超时（毫秒）。超过就中断这次尝试并触发重试，避免连接挂起时无限等待。 */
+const REQUEST_TIMEOUT_MS = 60_000
+
 /**
  * 把一段对话发给模型，拿回它的回复。
  *
@@ -120,6 +123,13 @@ export async function callLLM(
   let lastError: unknown
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      // 每次尝试都新建一个超时信号：到点自动中断这次 fetch。
+      // 若调用方也传了信号（如 Ctrl+C），用 AbortSignal.any 合并——任一触发都中断。
+      const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      const requestSignal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal
+
       const response = await fetch(`${BASE_URL}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -128,7 +138,7 @@ export async function callLLM(
           ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
         },
         body: JSON.stringify(body),
-        signal: options.signal,
+        signal: requestSignal,
       })
 
       // 429=被限流，5xx=服务端出错：这两类是"等一下也许就好了"，值得重试。
@@ -172,8 +182,9 @@ export async function callLLM(
         raw: assistantMessage,
       }
     } catch (err) {
-      // 请求被主动取消（Ctrl+C）就别重试了，直接抛出。
+      // 调用方主动取消（Ctrl+C，name='AbortError'）→ 别重试，直接抛出。
       if (err instanceof Error && err.name === 'AbortError') throw err
+      // 请求超时（name='TimeoutError'）或网络异常 → 临时故障，退避后重试。
       lastError = err
       await sleep(backoffMs(attempt))
     }

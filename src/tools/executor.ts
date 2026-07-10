@@ -98,14 +98,24 @@ export async function executeTool(
     return { ok: false, content: `错误：找不到名为 "${name}" 的工具` }
   }
 
-  // 第 1 步：校验。任一步返回非 null，就在此中止并把结果交出去。
-  const validateResult = await validate(tool, args)
-  if (validateResult) return validateResult
+  // 三步管线整体包一层兜底 try/catch（Step 10 · 优雅降级）：
+  // 万一某个工具忘了自己 catch、或权限确认那步抛了异常，就把"意外崩溃"降级成
+  // 一条错误结果喂回模型，而不是让整个 agentic loop 崩掉。
+  try {
+    // 第 1 步：校验。任一步返回非 null，就在此中止并把结果交出去。
+    const validateResult = await validate(tool, args)
+    if (validateResult) return validateResult
 
-  // 第 2 步：权限。
-  const permissionResult = await permission(tool, args)
-  if (permissionResult) return permissionResult
+    // 第 2 步：权限。
+    const permissionResult = await permission(tool, args)
+    if (permissionResult) return permissionResult
 
-  // 第 3 步：执行。
-  return call(tool, args)
+    // 第 3 步：执行。
+    return await call(tool, args)
+  } catch (err) {
+    return {
+      ok: false,
+      content: `工具执行意外出错：${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
 }

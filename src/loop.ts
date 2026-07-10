@@ -13,7 +13,7 @@
  * 对应 Claude Code：src/query.ts 的 queryLoop（同样是 async function* + while）。
  */
 
-import { callLLM, type Message } from './llm.js'
+import { callLLM, type Message, type LLMResponse } from './llm.js'
 import { allTools } from './tools/index.js'
 import { executeTool } from './tools/executor.js'
 import { toOpenAITools } from './types.js'
@@ -30,6 +30,7 @@ export type AgentEvent =
   | { type: 'assistant_text'; text: string }              // 模型给出文本回复
   | { type: 'tool_start'; name: string; args: unknown }   // 开始执行某个工具
   | { type: 'tool_result'; name: string; ok: boolean; content: string } // 工具结果
+  | { type: 'error'; reason: string }                     // 不可恢复错误（如 LLM 重试耗尽），优雅收尾
   | { type: 'max_turns' }                                 // 到达轮次上限，强制结束
 
 /**
@@ -57,7 +58,19 @@ export async function* runAgent(
     yield { type: 'turn_start', turn: turn + 1 }
 
     // ---- 1. 问模型（带上工具清单）----
-    const response = await callLLM(messages, { tools })
+    // callLLM 内部已对超时/限流/网络异常重试。若仍彻底失败，它会抛异常。
+    // 这里捕获它，转成 error 事件【优雅收尾】——和 max_turns 一样走"事件通道"，
+    // 而不是把异常抛给界面。这维持了"loop 只通过事件对外沟通"的承重原则。
+    let response: LLMResponse
+    try {
+      response = await callLLM(messages, { tools })
+    } catch (err) {
+      yield {
+        type: 'error',
+        reason: err instanceof Error ? err.message : String(err),
+      }
+      return // ← 出口3：不可恢复错误，优雅结束
+    }
 
     // ---- 2. 模型给的是纯文本 → 本轮对话结束 ----
     if (response.type === 'text') {
