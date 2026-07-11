@@ -42,6 +42,27 @@ function vlog(line: string): void {
   if (VERBOSE) console.log(`\x1b[90m  [verbose] ${line}\x1b[0m`)
 }
 
+/**
+ * "思考中…"指示器（Step 11 · (b)）：等模型出第一个字/第一个工具前转个圈，
+ * 一有输出就抹掉。纯界面糖——只用 stdout，loop 毫不知情（维持解耦）。
+ * 只在真实终端(TTY)里转；管道/重定向时不转，避免 \r 刷屏成乱码。
+ */
+let thinkingTimer: ReturnType<typeof setInterval> | null = null
+function startThinking(): void {
+  if (!stdout.isTTY || thinkingTimer) return
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+  let i = 0
+  thinkingTimer = setInterval(() => {
+    stdout.write(`\r${frames[i++ % frames.length]} 思考中…`)
+  }, 80)
+}
+function stopThinking(): void {
+  if (!thinkingTimer) return
+  clearInterval(thinkingTimer)
+  thinkingTimer = null
+  stdout.write('\r\x1b[K') // 回行首 + 清到行尾，抹掉"思考中…"
+}
+
 // ============================================================================
 // 一、对话历史（存在内存里）
 // ============================================================================
@@ -101,18 +122,40 @@ async function main(): Promise<void> {
     // ---- Eval：交给 agentic loop，消费它吐出的事件流 ----
     // 核心与界面解耦：loop 只产生事件，index.ts（界面）负责把每种事件显示成
     // 终端文字。将来换成 Web/Mac，只需换这段显示逻辑，loop 一行不动。
+    // streaming: 本轮是否已开始逐字打印助手文本（用来只打一次"助手 › "前缀）。
+    let streaming = false
     try {
       for await (const event of runAgent(messages)) {
         switch (event.type) {
           case 'turn_start':
             // 仅 verbose：画一条轮次分隔线，让你看清 loop 转了几圈。
             vlog(`──────── 第 ${event.turn} 轮 ────────`)
+            startThinking() // 开始等这一轮模型的输出（首字前的空白由它填上）
+            break
+          case 'assistant_delta':
+            stopThinking() // 第一个字来了，停掉"思考中…"
+            // 流式逐字：第一段碎片先打"助手 › "前缀，之后每段直接写（不换行）。
+            if (!streaming) {
+              vlog('💬 模型决定：直接用文本回答（流式）')
+              // TTY 下指示器刚被清掉，复用那一行写前缀；非 TTY 无指示器，用换行分隔。
+              stdout.write(stdout.isTTY ? '助手 › ' : '\n助手 › ')
+              streaming = true
+            }
+            stdout.write(event.text)
             break
           case 'assistant_text':
-            vlog('💬 模型决定：直接用文本回答 → 本轮对话结束')
-            console.log(`\n助手 › ${event.text}\n`)
+            stopThinking() // 兜底：空回复没有 delta 时也把指示器停掉
+            // 正文已通过 delta 逐字打过了，这里补两个换行收尾。
+            // 兜底：若一个 delta 都没来（如空回复），仍打印完整文本。
+            if (!streaming && event.text) {
+              stdout.write(stdout.isTTY ? `助手 › ${event.text}` : `\n助手 › ${event.text}`)
+            }
+            stdout.write('\n\n')
+            streaming = false
             break
           case 'tool_start':
+            stopThinking() // 要调工具了，停掉"思考中…"
+            if (streaming) { stdout.write('\n'); streaming = false } // 收尾可能存在的流式文本行
             vlog(`🤔 模型决定：调用工具 ${event.name}，参数=${JSON.stringify(event.args)}`)
             console.log(`  🔧 调用工具 ${event.name}(${JSON.stringify(event.args)})`)
             break
@@ -128,15 +171,19 @@ async function main(): Promise<void> {
             break
           }
           case 'error':
+            stopThinking()
             console.log(`\n[出错] ${event.reason}\n`)
             break
           case 'max_turns':
+            stopThinking()
             console.log('\n[提示] 达到最大轮次，已强制结束本轮。\n')
             break
         }
       }
     } catch (err) {
       console.error(`\n[出错] ${String(err)}\n`)
+    } finally {
+      stopThinking() // 兜底：无论正常结束还是异常，都别让指示器留着转
     }
     // ---- Loop：回到 while 顶部，继续等下一句 ----
   }

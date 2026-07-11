@@ -69,6 +69,15 @@ export type LLMResponse =
   | { type: 'text'; text: string; raw: Message }
   | { type: 'tool_calls'; toolCalls: ToolCall[]; raw: Message }
 
+/**
+ * 流式版 streamLLM 一路吐出的内部事件：
+ * - text_delta：一小段文本碎片（模型边生成边发）。
+ * - done：流结束，附上拼好的完整回复（LLMResponse），供 loop 决策与存历史。
+ */
+export type LLMStreamEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'done'; response: LLMResponse }
+
 // ============================================================================
 // 二、配置：从环境变量读网关地址和模型名，带默认值
 // ============================================================================
@@ -97,22 +106,25 @@ const MAX_RETRIES = 3
 const REQUEST_TIMEOUT_MS = 60_000
 
 /**
- * 把一段对话发给模型，拿回它的回复。
+ * 把一段对话发给模型，【流式】拿回它的回复（Step 11）。
+ *
+ * 为什么是 async generator：我们的 loop 本身就是生成器，callLLM 也做成生成器后，
+ * 两者天然咬合——文本碎片像水一样从这里流进 loop、再到界面，全程都是"事件"。
  *
  * @param messages 完整的对话历史（system/user/assistant/tool 混合）
  * @param options  可选：工具定义、中断信号
- * @returns        LLMResponse：'text' 或 'tool_calls'
+ * @yields         text_delta（文本碎片）…… 最后一个 done（完整回复）
  */
-export async function callLLM(
+export async function* streamLLM(
   messages: Message[],
   options: CallOptions = {},
-): Promise<LLMResponse> {
-  // 组装请求体。stream:false 表示"等模型全部说完再一次性返回"（Phase 1 够用，
-  // 逐字流式是 Step 11 的事）。tools 只在传了的时候才加进去。
+): AsyncGenerator<LLMStreamEvent, void, void> {
+  // 组装请求体。stream:true = 让模型边生成边发（逐字），而不是全写完一次性给。
+  // tools 只在传了的时候才加进去。
   const body: Record<string, unknown> = {
     model: MODEL,
     messages,
-    stream: false,
+    stream: true,
   }
   if (options.tools && options.tools.length > 0) {
     body.tools = options.tools
@@ -121,6 +133,8 @@ export async function callLLM(
   // 重试循环：解决"网络抖动 / 被限流(429)"这类临时性失败。
   // 用指数退避（每次等待翻倍），避免在服务繁忙时火上浇油。
   let lastError: unknown
+  // 一旦开始 yield 文本碎片就置 true：此后即使出错也不能重试（会重复输出）。
+  let streamStarted = false
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       // 每次尝试都新建一个超时信号：到点自动中断这次 fetch。
@@ -154,36 +168,76 @@ export async function callLLM(
         throw new Error(`LLM 请求失败 ${response.status}: ${text}`)
       }
 
-      // 解析返回。网关是 OpenAI 兼容格式，回复在 choices[0].message。
-      const data = (await response.json()) as ChatCompletionResponse
-      const message = data.choices?.[0]?.message
-      if (!message) {
-        throw new Error('LLM 返回里没有 choices[0].message')
+      // 流式响应必须有可读的 body。
+      if (!response.body) {
+        throw new Error('LLM 流式响应没有 body')
       }
 
-      // 把原始返回翻译成我们的前瞻式 LLMResponse。
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: message.content ?? null,
-        tool_calls: message.tool_calls,
-      }
+      // ---- 逐块读取 SSE 流 ----
+      // 网关按 OpenAI 格式，每个事件是一行 `data: {json}`，最后以 `data: [DONE]` 收尾。
+      // 文本碎片在 choices[0].delta.content；工具调用在 delta.tool_calls（也分块来）。
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = '' // 攒不完整的行：一个 data JSON 可能被网络切成两半到达。
 
-      // 有 tool_calls → 模型想调工具；否则 → 模型在说话。
-      if (message.tool_calls && message.tool_calls.length > 0) {
-        return {
-          type: 'tool_calls',
-          toolCalls: message.tool_calls,
-          raw: assistantMessage,
+      let contentAcc = '' // 拼完整文本
+      const toolCallsAcc: ToolCall[] = [] // 按 index 拼完整工具调用
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        streamStarted = true
+        buffer += decoder.decode(value, { stream: true })
+
+        // 用换行切分；最后一段可能是半行，留到下一次拼。
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith('data:')) continue
+          const payload = trimmed.slice(5).trim()
+          if (payload === '' || payload === '[DONE]') continue
+
+          let chunk: ChatCompletionChunk
+          try {
+            chunk = JSON.parse(payload)
+          } catch {
+            continue // 半行/杂行，跳过
+          }
+          const delta = chunk.choices?.[0]?.delta
+          if (!delta) continue
+
+          // 文本碎片：累加 + 立刻吐给上层（逐字显示的关键）。
+          if (delta.content) {
+            contentAcc += delta.content
+            yield { type: 'text_delta', text: delta.content }
+          }
+          // 工具调用碎片：默默拼齐，不逐字显示。
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) accumulateToolCall(toolCallsAcc, tc)
+          }
         }
       }
-      return {
-        type: 'text',
-        text: message.content ?? '',
-        raw: assistantMessage,
+
+      // 流读完 → 拼出完整的 assistant 消息 + LLMResponse，吐一个 done 收尾。
+      const toolCalls = toolCallsAcc.filter(Boolean)
+      const assistantMessage: Message = {
+        role: 'assistant',
+        content: contentAcc || null,
+        tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
       }
+      const finalResponse: LLMResponse =
+        toolCalls.length > 0
+          ? { type: 'tool_calls', toolCalls, raw: assistantMessage }
+          : { type: 'text', text: contentAcc, raw: assistantMessage }
+      yield { type: 'done', response: finalResponse }
+      return
     } catch (err) {
       // 调用方主动取消（Ctrl+C，name='AbortError'）→ 别重试，直接抛出。
       if (err instanceof Error && err.name === 'AbortError') throw err
+      // 已经开始吐文本碎片了 → 不能重试（会重复输出），直接抛给上层处理。
+      if (streamStarted) throw err
       // 请求超时（name='TimeoutError'）或网络异常 → 临时故障，退避后重试。
       lastError = err
       await sleep(backoffMs(attempt))
@@ -192,7 +246,7 @@ export async function callLLM(
 
   // 重试用尽仍失败。
   throw new Error(
-    `callLLM 在 ${MAX_RETRIES + 1} 次尝试后仍失败：${String(lastError)}`,
+    `streamLLM 在 ${MAX_RETRIES + 1} 次尝试后仍失败：${String(lastError)}`,
   )
 }
 
@@ -210,13 +264,36 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-/** 网关返回体里我们关心的部分（只声明用到的字段）。 */
-interface ChatCompletionResponse {
+/** 流式 chunk 里我们关心的部分（只声明用到的字段）。 */
+interface ChatCompletionChunk {
   choices?: Array<{
-    message?: {
-      role: string
-      content: string | null
-      tool_calls?: ToolCall[]
+    delta?: {
+      content?: string | null
+      tool_calls?: ToolCallDelta[]
     }
   }>
+}
+
+/** 工具调用的"碎片"：id/name 在第一块给，arguments 会分多块拼接。 */
+interface ToolCallDelta {
+  index?: number
+  id?: string
+  type?: 'function'
+  function?: { name?: string; arguments?: string }
+}
+
+/**
+ * 把一块工具调用碎片拼进累加器（按 index 归位）。
+ * 第一块带 id 和 name；后续块只带 arguments 的一部分，往后拼即可。
+ */
+function accumulateToolCall(acc: ToolCall[], delta: ToolCallDelta): void {
+  const i = delta.index ?? 0
+  let entry = acc[i]
+  if (!entry) {
+    entry = { id: delta.id ?? '', type: 'function', function: { name: '', arguments: '' } }
+    acc[i] = entry
+  }
+  if (delta.id) entry.id = delta.id
+  if (delta.function?.name) entry.function.name += delta.function.name
+  if (delta.function?.arguments) entry.function.arguments += delta.function.arguments
 }

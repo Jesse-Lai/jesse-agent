@@ -13,7 +13,7 @@
  * 对应 Claude Code：src/query.ts 的 queryLoop（同样是 async function* + while）。
  */
 
-import { callLLM, type Message, type LLMResponse } from './llm.js'
+import { streamLLM, type Message, type LLMResponse } from './llm.js'
 import { allTools } from './tools/index.js'
 import { executeTool } from './tools/executor.js'
 import { toOpenAITools } from './types.js'
@@ -27,7 +27,8 @@ const MAX_TURNS = 10
  */
 export type AgentEvent =
   | { type: 'turn_start'; turn: number }                  // 新一轮开始（第几次问模型）
-  | { type: 'assistant_text'; text: string }              // 模型给出文本回复
+  | { type: 'assistant_delta'; text: string }             // 模型文本的一小段（流式逐字）
+  | { type: 'assistant_text'; text: string }              // 模型文本回复的完整版（本轮结束）
   | { type: 'tool_start'; name: string; args: unknown }   // 开始执行某个工具
   | { type: 'tool_result'; name: string; ok: boolean; content: string } // 工具结果
   | { type: 'error'; reason: string }                     // 不可恢复错误（如 LLM 重试耗尽），优雅收尾
@@ -57,19 +58,31 @@ export async function* runAgent(
     // turn 从 0 开始计数，给人看时 +1 更自然（"第 1 轮"）。
     yield { type: 'turn_start', turn: turn + 1 }
 
-    // ---- 1. 问模型（带上工具清单）----
-    // callLLM 内部已对超时/限流/网络异常重试。若仍彻底失败，它会抛异常。
-    // 这里捕获它，转成 error 事件【优雅收尾】——和 max_turns 一样走"事件通道"，
-    // 而不是把异常抛给界面。这维持了"loop 只通过事件对外沟通"的承重原则。
-    let response: LLMResponse
+    // ---- 1. 问模型（流式）----
+    // streamLLM 是生成器：一路吐 text_delta（文本碎片），最后吐一个 done（完整回复）。
+    // 我们把文本碎片【转发】成 assistant_delta 事件给界面逐字显示；done 里的完整回复
+    // 留作决策与存历史用。streamLLM 内部已对超时/限流/网络重试；仍失败会抛异常，这里
+    // 捕获转成 error 事件优雅收尾（维持"loop 只通过事件对外沟通"的承重原则）。
+    let response: LLMResponse | undefined
     try {
-      response = await callLLM(messages, { tools })
+      for await (const ev of streamLLM(messages, { tools })) {
+        if (ev.type === 'text_delta') {
+          yield { type: 'assistant_delta', text: ev.text }
+        } else {
+          response = ev.response // done：拿到拼好的完整回复
+        }
+      }
     } catch (err) {
       yield {
         type: 'error',
         reason: err instanceof Error ? err.message : String(err),
       }
       return // ← 出口3：不可恢复错误，优雅结束
+    }
+    // 正常情况下 streamLLM 一定会给一个 done；万一没有，防御一下。
+    if (!response) {
+      yield { type: 'error', reason: '模型没有返回任何内容' }
+      return
     }
 
     // ---- 2. 模型给的是纯文本 → 本轮对话结束 ----
