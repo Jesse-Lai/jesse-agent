@@ -3,6 +3,7 @@
  */
 
 import type { Tool } from '../types.js'
+import { formatTaskDetails } from '../taskDisplay.js'
 import { stopTask } from '../tasks.js'
 
 export const taskStopTool: Tool = {
@@ -29,11 +30,7 @@ export const taskStopTool: Tool = {
     const task = await stopTask(taskId)
     return [
       'Background task stop requested.',
-      `task_id: ${task.id}`,
-      `kind: ${task.kind}`,
-      `status: ${task.status}`,
-      `description: ${task.description}`,
-      `output_path: ${task.outputPath}`,
+      formatTaskDetails(task),
     ].join('\n')
   },
 }

@@ -336,7 +336,8 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Show clearer command/task status and bounded tool-result previews
 - [x] Add `/diff` for current git changes
 - [x] Add `--sessions` and `/sessions` to list recent JSONL sessions with resume commands
-- [ ] Add richer file links and task progress
+- [x] Add richer terminal file links with an OSC 8-style path helper
+- [x] Add task progress summaries with duration, output size, output path, and last activity
 - [ ] Consider IDE integration after the CLI core is stable
 - [x] Keep the agent core UI-agnostic
 - **Why:** Interface polish matters, but it should wrap a stable engine rather than drive the architecture.

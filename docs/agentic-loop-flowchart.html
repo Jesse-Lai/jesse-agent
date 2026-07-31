@@ -66,10 +66,10 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
 <div class="progress-wrap">
     <div class="progress-head">
         <span class="label">🛠️ jesse-agent Coding Agent 总进度</span>
-        <span class="count">Phase 1-7 ✅ · Phase 8 / Step 27 当前 · 7 / 8 阶段</span>
+        <span class="count">Phase 1-7 ✅ · Phase 8 / Step 27 终端 slice ✅ · 7 / 8 阶段</span>
     </div>
-    <div class="progress-bar"><span style="width:88%;"></span></div>
-    <div class="progress-note">核心的 <b>agentic loop、工具管线、权限、会话、压缩、记忆、Skills、MCP、sub-agent、worktree 和 eval harness 已经跑通</b>。当前进入 <b>Phase 8 / Step 27：Coding Interfaces</b>，目标是改善终端编码体验，同时保持核心 UI-agnostic。右栏：✅ 已完成 · 🟠 当前阶段 · 灰色 = 待做。</div>
+    <div class="progress-bar"><span style="width:91%;"></span></div>
+    <div class="progress-note">核心的 <b>agentic loop、工具管线、权限、会话、压缩、记忆、Skills、MCP、sub-agent、worktree、eval harness 和终端编码界面</b> 已经跑通。<b>Phase 8 / Step 27：Coding Interfaces</b> 的终端 slice 已完成；IDE integration 继续延后。右栏：✅ 已完成 · 🟠 当前阶段 · 灰色 = 待做。</div>
 </div>
 
 <div class="compare">
@@ -200,7 +200,7 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
             <div class="step" data-status="done"><div class="s-title">Step 24 · Background Tasks</div><div class="s-desc">统一 task registry，后台 shell 可启动、列表、读输出、停止；sub-agent 留好扩展口</div><div class="s-file">src/tasks.ts · src/tools/task*.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 25 · Worktree 隔离</div><div class="s-desc">enter/exit worktree，动态切换项目根目录，JSONL 记录可恢复</div><div class="s-file">src/worktrees.ts · src/tools/enterWorktree.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 26 · Evaluation Harness</div><div class="s-desc">npm run eval，用 scripted LLM 驱动真实 loop，检查校验、安全、编辑和验证行为</div><div class="s-file">src/evals/runner.ts</div></div>
-            <div class="step" data-status="done"><div class="s-title">Step 27 · Coding Interfaces</div><div class="s-desc">CLI renderer、工具活动摘要、edit/write diff、/diff 和 /sessions；task progress 待扩展</div><div class="s-file">src/cliRenderer.ts · src/diff.ts · src/gitDiff.ts</div><span class="tag">first slice+</span></div>
+            <div class="step" data-status="done"><div class="s-title">Step 27 · Coding Interfaces</div><div class="s-desc">CLI renderer、工具活动摘要、edit/write diff、/diff、/sessions、文件链接和 task progress</div><div class="s-file">src/cliRenderer.ts · src/diff.ts · src/gitDiff.ts · src/taskDisplay.ts</div><span class="tag">complete slice</span></div>
         </div>
     </div>
 

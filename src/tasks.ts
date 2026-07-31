@@ -31,6 +31,7 @@ interface BaseTask {
   outputPath: string
   outputBytes: number
   lastOutputAt: number
+  lastActivity?: string
   exitCode?: number | null
   signal?: NodeJS.Signals | null
   error?: string
@@ -61,6 +62,7 @@ export interface TaskSnapshot {
   outputPath: string
   outputBytes: number
   lastOutputAt: string
+  lastActivity?: string
   stale: boolean
   staleReason?: string
   command?: string
@@ -108,6 +110,7 @@ export async function startShellTask(input: StartShellTaskInput): Promise<TaskSn
     outputPath,
     outputBytes: 0,
     lastOutputAt: now,
+    lastActivity: `started: ${command}`,
     command,
     cwd: resolvedCwd.displayPath,
     process: child,
@@ -116,6 +119,7 @@ export async function startShellTask(input: StartShellTaskInput): Promise<TaskSn
   tasks.set(id, task)
 
   appendTaskOutput(task, `$ ${command}\n[cwd] ${resolvedCwd.displayPath}\n\n`)
+  task.lastActivity = `started: ${command}`
   child.stdout.on('data', chunk => appendTaskOutput(task, chunk))
   child.stderr.on('data', chunk => appendTaskOutput(task, withChannelPrefix('stderr', chunk)))
 
@@ -221,6 +225,7 @@ function snapshotTask(task: BackgroundTask): TaskSnapshot {
     outputPath: task.outputPath,
     outputBytes: task.outputBytes,
     lastOutputAt: new Date(task.lastOutputAt).toISOString(),
+    lastActivity: task.lastActivity,
     stale,
     staleReason: stale
       ? `任务仍在运行，但 ${Math.round(silentForMs / 1000)} 秒没有新输出；可能在等待输入、卡住，或只是安静运行。`
@@ -243,7 +248,18 @@ function appendTaskOutput(task: ShellTask, chunk: string | Buffer): void {
   if (!text) return
   task.outputBytes += Buffer.byteLength(text)
   task.lastOutputAt = Date.now()
+  task.lastActivity = lastMeaningfulLine(text) ?? task.lastActivity
   task.outputStream.write(text)
+}
+
+function lastMeaningfulLine(text: string): string | undefined {
+  const line = text
+    .split('\n')
+    .map(part => part.trim())
+    .reverse()
+    .find(Boolean)
+  if (!line) return undefined
+  return line.length <= 160 ? line : `${line.slice(0, 157)}...`
 }
 
 function withChannelPrefix(channel: string, chunk: string | Buffer): string {

@@ -1,6 +1,7 @@
 import { stdout } from 'node:process'
 import type { AgentEvent } from './loop.js'
 import { formatSimpleDiff } from './diff.js'
+import { formatTerminalPath, linkifyPathFields } from './terminalLinks.js'
 
 export interface CliRendererOptions {
   verbose: boolean
@@ -34,7 +35,7 @@ export class CliRenderer {
     if (info.mcpToolCount > 0) {
       console.log(`  MCP: loaded ${info.mcpToolCount} tool(s) from ${info.mcpServerCount} server(s)`)
     }
-    if (info.worktreePath) console.log(`  Worktree: ${info.worktreePath}`)
+    if (info.worktreePath) console.log(`  Worktree: ${formatTerminalPath(info.worktreePath, { link: stdout.isTTY })}`)
     if (info.resumedMessageCount !== undefined) console.log(`  Resumed messages: ${info.resumedMessageCount}`)
     if (this.verbose) console.log('  Verbose: enabled')
     for (const error of info.mcpErrors) console.log(`  [mcp] ${error}`)
@@ -71,7 +72,7 @@ export class CliRenderer {
         console.log(renderToolStart(event.name, event.args, stdout.isTTY))
         return
       case 'tool_result':
-        console.log(renderToolResult(event.name, event.ok, event.content))
+        console.log(renderToolResult(event.name, event.ok, event.content, stdout.isTTY))
         this.vlog(`tool result: ${event.ok ? 'ok' : 'failed'}, ${event.content.length} chars`)
         return
       case 'error':
@@ -118,13 +119,13 @@ export function createCliRenderer(options: CliRendererOptions): CliRenderer {
 
 function renderToolStart(name: string, args: unknown, color: boolean): string {
   const input = asRecord(args)
-  const lines = [`  -> ${toolTitle(name, input)}`]
+  const lines = [`  -> ${toolTitle(name, input, color)}`]
 
   if (name === 'edit_file') {
     const path = stringArg(input.path, '(missing path)')
     const oldString = stringArg(input.old_string)
     const newString = stringArg(input.new_string)
-    lines[0] = `  -> edit ${path}`
+    lines[0] = `  -> edit ${formatTerminalPath(path, { link: color })}`
     lines.push(`     replace: ${input.replace_all === true ? 'all matches' : 'first unique match'}`)
     if (oldString !== undefined && newString !== undefined) {
       lines.push(indent(formatSimpleDiff(oldString, newString, { filePath: path, color, maxLines: 28 }), '     '))
@@ -135,7 +136,7 @@ function renderToolStart(name: string, args: unknown, color: boolean): string {
   if (name === 'write_file') {
     const path = stringArg(input.path, '(missing path)')
     const content = stringArg(input.content, '')
-    lines[0] = `  -> write ${path}`
+    lines[0] = `  -> write ${formatTerminalPath(path, { link: color })}`
     lines.push(`     content: ${content.length.toLocaleString()} chars, ${lineCount(content).toLocaleString()} lines`)
     if (content.length > 0) {
       lines.push(indent(formatSimpleDiff('', content, { filePath: path, color, maxLines: 24 }), '     '))
@@ -145,7 +146,7 @@ function renderToolStart(name: string, args: unknown, color: boolean): string {
 
   if (name === 'run_command' || name === 'run_background_command') {
     lines[0] = name === 'run_command' ? '  -> run command' : '  -> start background command'
-    lines.push(`     cwd: ${stringArg(input.cwd, '.')}`)
+    lines.push(`     cwd: ${formatTerminalPath(stringArg(input.cwd, '.'), { link: color })}`)
     lines.push(`     $ ${stringArg(input.command, '(missing command)')}`)
     const description = stringArg(input.description)
     if (description) lines.push(`     description: ${description}`)
@@ -157,20 +158,20 @@ function renderToolStart(name: string, args: unknown, color: boolean): string {
   return lines.join('\n')
 }
 
-function renderToolResult(name: string, ok: boolean, content: string): string {
+function renderToolResult(name: string, ok: boolean, content: string, linkPaths: boolean): string {
   const status = ok ? 'ok' : 'failed'
   const lines = [`  ${ok ? '✓' : '✗'} ${name}: ${status}`]
-  const preview = previewText(content, { maxChars: 900, maxLines: 8 })
+  const preview = linkifyPathFields(previewText(content, { maxChars: 900, maxLines: 8 }), linkPaths)
   if (preview) lines.push(indent(preview, '     '))
   return lines.join('\n')
 }
 
-function toolTitle(name: string, input: Record<string, unknown>): string {
+function toolTitle(name: string, input: Record<string, unknown>, linkPaths: boolean): string {
   switch (name) {
     case 'read_file':
-      return `read ${stringArg(input.path, '(missing path)')}`
+      return `read ${formatTerminalPath(stringArg(input.path, '(missing path)'), { link: linkPaths })}`
     case 'list_files':
-      return `list ${stringArg(input.path, '.')}`
+      return `list ${formatTerminalPath(stringArg(input.path, '.'), { link: linkPaths })}`
     case 'glob':
     case 'glob_files':
       return `glob ${stringArg(input.pattern, '(missing pattern)')}`

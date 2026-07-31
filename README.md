@@ -150,7 +150,9 @@ The first eval slice uses a scripted fake LLM to drive the real `runAgent()` loo
 
 ## CLI Rendering
 
-Terminal display lives in `src/cliRenderer.ts`; the agent loop still only yields typed events. The renderer turns those events into coding-focused output: readable tool activity, command summaries, bounded result previews, and simplified inline diffs for file edits/writes. This keeps the core UI-agnostic while making the terminal experience easier to scan.
+Terminal display lives in `src/cliRenderer.ts`; the agent loop still only yields typed events. The renderer turns those events into coding-focused output: readable tool activity, command summaries, bounded result previews, simplified inline diffs for file edits/writes, and clickable terminal file links where supported. This keeps the core UI-agnostic while making the terminal experience easier to scan.
+
+Background task output uses `src/taskDisplay.ts` to show status, duration, output size, output path, and the latest activity line. This is the simplified version of Claude Code's task progress surface: task state stays in the registry, and display formatting stays outside the core agent loop.
 
 Useful local commands:
 

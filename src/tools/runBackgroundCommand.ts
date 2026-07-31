@@ -3,6 +3,7 @@
  */
 
 import type { Tool } from '../types.js'
+import { formatTaskDetails } from '../taskDisplay.js'
 import { startShellTask, type TaskSnapshot } from '../tasks.js'
 
 export const runBackgroundCommandTool: Tool = {
@@ -43,13 +44,7 @@ export const runBackgroundCommandTool: Tool = {
 function formatStartedTask(task: TaskSnapshot): string {
   return [
     'Background task started.',
-    `task_id: ${task.id}`,
-    `kind: ${task.kind}`,
-    `status: ${task.status}`,
-    `description: ${task.description}`,
-    `cwd: ${task.cwd ?? '.'}`,
-    `command: ${task.command ?? ''}`,
-    `output_path: ${task.outputPath}`,
+    formatTaskDetails(task),
     '',
     'Use task_output with this task_id to read output later. Use task_stop to stop it if needed.',
   ].join('\n')

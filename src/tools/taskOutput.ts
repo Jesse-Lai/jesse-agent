@@ -3,6 +3,7 @@
  */
 
 import type { Tool } from '../types.js'
+import { formatTaskDetails } from '../taskDisplay.js'
 import { readTaskOutput } from '../tasks.js'
 
 export const taskOutputTool: Tool = {
@@ -36,22 +37,7 @@ export const taskOutputTool: Tool = {
       maxChars: parsePositiveNumber(args.max_chars, 20_000),
     })
 
-    const task = result.snapshot
-    const lines = [
-      `retrieval_status: ${result.retrievalStatus}`,
-      `task_id: ${task.id}`,
-      `kind: ${task.kind}`,
-      `status: ${task.status}`,
-      `description: ${task.description}`,
-      `duration_ms: ${task.durationMs}`,
-      `output_path: ${task.outputPath}`,
-    ]
-
-    if (task.exitCode !== undefined) lines.push(`exit_code: ${task.exitCode}`)
-    if (task.signal) lines.push(`signal: ${task.signal}`)
-    if (task.staleReason) lines.push(`stale_warning: ${task.staleReason}`)
-    if (task.error) lines.push(`error: ${task.error}`)
-
+    const lines = [formatTaskDetails(result.snapshot, result.retrievalStatus)]
     lines.push('', '--- output ---', result.output.trimEnd() || '(no output yet)')
     return lines.join('\n')
   },

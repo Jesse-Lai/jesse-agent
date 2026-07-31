@@ -3,7 +3,8 @@
  */
 
 import type { Tool } from '../types.js'
-import { listTasks, type TaskSnapshot } from '../tasks.js'
+import { formatTaskLine } from '../taskDisplay.js'
+import { listTasks } from '../tasks.js'
 
 export const taskListTool: Tool = {
   name: 'task_list',
@@ -24,25 +25,6 @@ export const taskListTool: Tool = {
     const tasks = listTasks()
     if (tasks.length === 0) return 'No background tasks found.'
 
-    return tasks.map(formatTaskLine).join('\n')
+    return tasks.map(formatTaskLine).join('\n\n')
   },
-}
-
-function formatTaskLine(task: TaskSnapshot): string {
-  const stale = task.stale ? ` stale="${task.staleReason}"` : ''
-  const exit = task.exitCode === undefined ? '' : ` exit_code=${task.exitCode}`
-  const signal = task.signal ? ` signal=${task.signal}` : ''
-  return [
-    `- ${task.id}`,
-    `[${task.status}]`,
-    `kind=${task.kind}`,
-    `duration_ms=${task.durationMs}`,
-    `description="${task.description}"`,
-    `output_path=${task.outputPath}`,
-    task.command ? `command="${task.command}"` : '',
-    task.cwd ? `cwd=${task.cwd}` : '',
-    exit,
-    signal,
-    stale,
-  ].filter(Boolean).join(' ')
 }
