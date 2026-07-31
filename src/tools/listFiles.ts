@@ -6,7 +6,9 @@
  */
 
 import { readdir } from 'node:fs/promises'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
+import { resolveToolPath } from '../workingDirectory.js'
 
 export const listFilesTool: Tool = {
   name: 'list_files',
@@ -26,11 +28,12 @@ export const listFilesTool: Tool = {
   // 只读：只是查看，不改动 → 权限检查放行。
   isReadOnly: true,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const path = String(args.path ?? '.')
     try {
+      const normalizedPath = resolveToolPath(path, context)
       // withFileTypes: 拿到的每个条目能区分是文件还是目录。
-      const entries = await readdir(path, { withFileTypes: true })
+      const entries = await readdir(normalizedPath, { withFileTypes: true })
       if (entries.length === 0) return `目录 ${path} 为空`
       // 目录名后加 /，一眼能看出哪些是子目录。
       const lines = entries.map(e => (e.isDirectory() ? `${e.name}/` : e.name))

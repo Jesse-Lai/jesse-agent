@@ -25,6 +25,7 @@ import { exitPlanModeTool } from './exitPlanMode.js'
 import { runBackgroundCommandTool } from './runBackgroundCommand.js'
 import { taskListTool } from './taskList.js'
 import { taskOutputTool } from './taskOutput.js'
+import { taskContinueTool } from './taskContinue.js'
 import { taskStopTool } from './taskStop.js'
 import { enterWorktreeTool } from './enterWorktree.js'
 import { exitWorktreeTool } from './exitWorktree.js'
@@ -42,6 +43,7 @@ const builtInTools: Tool[] = [
   exitPlanModeTool,
   taskListTool,
   taskOutputTool,
+  taskContinueTool,
   taskStopTool,
   enterWorktreeTool,
   exitWorktreeTool,

@@ -17,6 +17,7 @@ import { streamLLM, type Message, type LLMResponse, type LLMStreamer } from './l
 import { getAllTools } from './tools/index.js'
 import { executeTool } from './tools/executor.js'
 import { toOpenAITools, type Tool } from './types.js'
+import { createAgentRuntimeContext, type AgentRuntimeContext } from './runtimeContext.js'
 
 // 最大轮次保护：防止模型无限调工具、永不收尾（死循环）。
 const MAX_TURNS = 10
@@ -26,6 +27,7 @@ export interface RunAgentOptions {
   maxTurns?: number
   llmStream?: LLMStreamer
   signal?: AbortSignal
+  context?: AgentRuntimeContext
   refreshSystemPrompt?: (messages: Message[]) => Promise<void>
 }
 
@@ -58,6 +60,7 @@ export async function* runAgent(
   const availableTools = options.tools ?? getAllTools()
   const maxTurns = options.maxTurns ?? MAX_TURNS
   const llmStream = options.llmStream ?? streamLLM
+  const runtimeContext = options.context ?? createAgentRuntimeContext()
   // 把我们的工具转成 OpenAI 格式，随每次请求发给模型，让它知道有哪些工具可用。
   const tools = toOpenAITools(availableTools)
 
@@ -135,7 +138,10 @@ export async function* runAgent(
       yield { type: 'tool_start', name: toolCall.function.name, args }
 
       // 走 Phase 2 的三步管线执行（含 validate → 权限确认 → call）。
-      const result = await executeTool(toolCall.function.name, args, { tools: availableTools })
+      const result = await executeTool(toolCall.function.name, args, {
+        tools: availableTools,
+        context: runtimeContext,
+      })
 
       // 吐出"工具结果"事件。
       yield {

@@ -347,10 +347,35 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Register background sub-agents as `kind: agent` tasks in the existing task registry
 - [x] Return `task_id` immediately and use `task_list` / `task_output` / `task_stop` for progress, output, and cancellation
 - [x] Write bounded progress events and the final sub-agent report to `.jesse/task-output/`
-- [x] Keep synchronous `isolation: "worktree"` intact, but reject `run_in_background=true` + `isolation: "worktree"` until project root state is per-agent instead of process-global
-- [ ] Add Claude Code-style interactive continuation/resume for background sub-agents
-- [ ] Add background sub-agent worktree isolation after the cwd/project-root model is fully scoped per agent
+- [x] Keep synchronous `isolation: "worktree"` intact, then enable `run_in_background=true` + `isolation: "worktree"` after adding per-agent runtime context
+- [x] Add current-process continuation for background sub-agents with `task_continue`
+- [x] Add background sub-agent worktree isolation after the cwd/project-root model is fully scoped per agent
 - **Why:** Claude Code-style coding work benefits from parallel investigations, but async agent lifecycle should build on the existing task surface instead of creating a second task system.
+
+### Step 29: Per-Agent Execution Context
+- [x] Add `AgentRuntimeContext` with per-agent `agentId`, `projectRoot`, `cwd`, original root, and optional worktree metadata
+- [x] Pass runtime context through `runAgent()` → `executeTool()` → individual tool `execute()` calls
+- [x] Teach file, edit, shell, background shell, grep, glob, and skill-loading tools to resolve paths from the active agent context instead of process-global cwd
+- [x] Run synchronous worktree sub-agents through their own context instead of temporarily switching global `process.cwd()` / project root
+- [x] Add an eval proving a child agent context can read relative paths from its own root without changing the parent project root
+- **Why:** Background agents and worktree agents need independent execution state. This is the foundation for Claude Code-style parallel workers.
+
+### Step 30: Background Sub-agent Worktree Isolation
+- [x] Allow `agent` to combine `run_in_background=true` with `isolation="worktree"`
+- [x] Create the worktree before returning the background `task_id`, then run the sub-agent with a worktree-scoped `AgentRuntimeContext`
+- [x] Reuse the same final cleanup semantics as synchronous worktree agents: remove unchanged worktrees, keep changed worktrees and report path/branch/status
+- [x] Keep isolated worktree sub-agents from launching nested background tasks or entering/exiting worktrees themselves
+- [x] Add an eval covering background task worktree context and kept-worktree cleanup result
+- **Why:** This unlocks Claude Code-style parallel coding workers without letting one agent's cwd leak into another agent.
+
+### Step 31: Background Agent Continuation
+- [x] Add `task_continue` to append a new prompt to a completed background agent task
+- [x] Reuse the same background agent messages and `AgentRuntimeContext` when continuing within the current process
+- [x] Persist background agent messages to `.jesse/task-output/<task-id>.messages.jsonl` after each run as the foundation for future cross-process resume
+- [x] Show continuation availability and transcript path in task list/output details
+- [x] Add an eval proving `task_continue` restarts the same agent task and records continued output
+- [ ] Add full cross-process resume that can reload a background agent task after the CLI restarts
+- **Why:** Claude Code-style background workers should be steerable after they finish, while keeping their intermediate context out of the parent conversation.
 
 ---
 

@@ -3,6 +3,7 @@
  */
 
 import type { Tool } from '../types.js'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import { formatTaskDetails } from '../taskDisplay.js'
 import { startShellTask, type TaskSnapshot } from '../tasks.js'
 
@@ -27,7 +28,7 @@ export const runBackgroundCommandTool: Tool = {
 
   isReadOnly: false,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const command = String(args.command ?? '').trim()
     if (!command) return '错误：未提供 command 参数。'
 
@@ -35,6 +36,7 @@ export const runBackgroundCommandTool: Tool = {
       command,
       cwd: args.cwd,
       description: typeof args.description === 'string' ? args.description : undefined,
+      context,
     })
 
     return formatStartedTask(task)

@@ -7,7 +7,9 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
+import { resolveWorkingDirectory } from '../workingDirectory.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -35,7 +37,7 @@ export const globFilesTool: Tool = {
 
   isReadOnly: true,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const pattern = String(args.pattern ?? '').trim()
     if (!pattern) return '错误：未提供 pattern 参数'
 
@@ -43,10 +45,11 @@ export const globFilesTool: Tool = {
     const maxResults = normalizeMaxResults(args.max_results)
 
     try {
+      const cwd = await resolveWorkingDirectory('.', context)
       const { stdout } = await execFileAsync(
         'rg',
         ['--files', '--glob', pattern, path],
-        { timeout: RG_TIMEOUT_MS, maxBuffer: RG_MAX_BUFFER },
+        { cwd: cwd.absolutePath, timeout: RG_TIMEOUT_MS, maxBuffer: RG_MAX_BUFFER },
       )
 
       const files = stdout.split('\n').map(line => line.trim()).filter(Boolean)

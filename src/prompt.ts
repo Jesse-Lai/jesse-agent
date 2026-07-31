@@ -69,6 +69,7 @@ function toolsSection(): string {
 - run_command 的 cwd 参数表示命令执行目录，默认是项目根目录；需要在子目录运行命令时传 cwd，不要用 cd ... && ...。
 - 预计很快完成的 shell 命令用 run_command；可能运行较久的测试、构建或调查用 run_background_command，让主对话保持响应。
 - 后台任务启动后会返回 task_id；用 task_list 查看任务，用 task_output 读取输出或等待完成，用 task_stop 停止不需要的任务。
+- 如果后台 agent task 已完成但用户要追问同一个 worker，用 task_continue 追加 prompt，让它带着原来的 messages/context 继续跑。
 - 不要在 run_background_command 的 command 末尾再加 &；后台化由工具负责。
 - 如果一次要调用多个相互独立的工具（彼此不依赖对方的结果），可以在一条回复里并行发起，提高效率；有先后依赖的调用则按顺序来。`
 }
@@ -79,7 +80,7 @@ function subAgentsSection(): string {
 - agent 工具会启动一个子 agent：它有独立 messages、独立 system prompt、受限制的工具池。
 - 默认同步运行：主 agent 等子 agent 完成后，收到最终报告作为工具结果。
 - 如果子任务可能很久、可以独立推进，设置 run_in_background=true：工具会立刻返回 task_id，之后用 task_list / task_output / task_stop 管理它。
-- 当前薄版限制：run_in_background=true 暂时不能和 isolation="worktree" 组合；需要 worktree 隔离时先同步运行。
+- 如果子任务需要并行编码或风险隔离，可以同时设置 run_in_background=true 和 isolation="worktree"；子 agent 会在自己的 worktree context 中运行，结束后无改动自动清理、有改动保留路径。
 - 适合用 agent 的情况：开放式代码探索、独立 review、实现后的 verify、会产生大量中间工具结果但主线程只需要结论的子任务。
 - 不适合用 agent 的情况：读取一个明确文件、搜索一个明确字符串、执行一两个直接命令；这些直接用 read_file / grep_code / run_command 更快。
 - 给子 agent 的 prompt 必须完整。它看不到主对话里你没写进去的背景；要交代目标、已知上下文、范围、输出格式和不要做什么。

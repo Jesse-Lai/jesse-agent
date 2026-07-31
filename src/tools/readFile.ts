@@ -6,8 +6,10 @@
  */
 
 import { readFile as fsReadFile } from 'node:fs/promises'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { rememberReadFile } from './readState.js'
+import { resolveToolPath } from '../workingDirectory.js'
 
 export const readFileTool: Tool = {
   name: 'read_file',
@@ -29,12 +31,13 @@ export const readFileTool: Tool = {
   // 只读：读文件不改动任何东西 → Step 6.5 权限检查会直接放行。
   isReadOnly: true,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const path = String(args.path ?? '')
     if (!path) return '错误：未提供 path 参数'
     try {
-      const content = await fsReadFile(path, 'utf-8')
-      await rememberReadFile(path, content)
+      const normalizedPath = resolveToolPath(path, context)
+      const content = await fsReadFile(normalizedPath, 'utf-8')
+      await rememberReadFile(normalizedPath, content, context)
       // 返回文本结果。这段会被喂回给模型（Phase 3 的 loop）。
       return content
     } catch (err) {

@@ -12,6 +12,8 @@
  *   预留 isReadOnly，后续 Phase 逐步往上加。
  */
 
+import type { AgentRuntimeContext } from './runtimeContext.js'
+
 // ============================================================================
 // 一、工具契约
 // ============================================================================
@@ -33,7 +35,7 @@ export interface Tool {
   description: string
   parameters: JSONSchema
   /** 执行工具。参数是模型给的（已按 parameters 解析成对象），返回文本结果。 */
-  execute: (args: Record<string, unknown>) => Promise<string>
+  execute: (args: Record<string, unknown>, context?: AgentRuntimeContext) => Promise<string>
   /** 是否只读。true=安全（读/看），false=有副作用（写/删/跑命令）。 */
   isReadOnly: boolean
 }

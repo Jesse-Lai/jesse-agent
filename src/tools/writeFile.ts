@@ -9,6 +9,7 @@
 
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { normalizeToolPath, refreshReadFile, requireFreshRead } from './readState.js'
 
@@ -30,24 +31,24 @@ export const writeFileTool: Tool = {
 
   isReadOnly: false,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const path = String(args.path ?? '').trim()
     const content = String(args.content ?? '')
     if (!path) return '错误：未提供 path 参数'
 
-    const normalizedPath = normalizeToolPath(path)
+    const normalizedPath = normalizeToolPath(path, context)
     const existing = await existingFileKind(normalizedPath)
     if (existing === 'directory') return `写入失败：${path} 是目录，不是文件。`
 
     if (existing === 'file') {
-      const readCheck = await requireFreshRead(path)
+      const readCheck = await requireFreshRead(path, context)
       if (typeof readCheck === 'string') return `写入被拒绝：${readCheck}`
     }
 
     try {
       await mkdir(dirname(normalizedPath), { recursive: true })
       await writeFile(normalizedPath, content, 'utf8')
-      await refreshReadFile(normalizedPath, content)
+      await refreshReadFile(normalizedPath, content, context)
 
       const action = existing === 'file' ? '覆盖' : '创建'
       return [

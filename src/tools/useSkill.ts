@@ -7,6 +7,7 @@
  */
 
 import type { Tool } from '../types.js'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import { loadSkill } from '../skills.js'
 
 export const useSkillTool: Tool = {
@@ -28,11 +29,11 @@ export const useSkillTool: Tool = {
 
   isReadOnly: true,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const name = String(args.name ?? '').trim()
     if (!name) return '错误：未提供 name 参数'
 
-    const loaded = await loadSkill(name)
+    const loaded = await loadSkill(name, context)
     if (typeof loaded === 'string') return loaded
 
     const skillArgs = typeof args.args === 'string' && args.args.trim()

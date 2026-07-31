@@ -10,12 +10,14 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { mkdir, open, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { AgentRuntimeContext } from './runtimeContext.js'
 import { resolveWorkingDirectory } from './workingDirectory.js'
 
 const TASK_OUTPUT_DIR = '.jesse/task-output'
 const DEFAULT_STALE_AFTER_MS = 30_000
 const DEFAULT_STOP_GRACE_MS = 2_000
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000
+const MEMORY_OUTPUT_TAIL_CHARS = 200_000
 
 export type TaskKind = 'shell' | 'agent'
 export type TaskStatus = 'running' | 'completed' | 'failed' | 'stopped'
@@ -29,6 +31,7 @@ interface BaseTask {
   endTime?: number
   outputPath: string
   outputBytes: number
+  outputTextTail: string
   lastOutputAt: number
   lastActivity?: string
   exitCode?: number | null
@@ -48,6 +51,8 @@ interface AgentTask extends BaseTask {
   kind: 'agent'
   abortController: AbortController
   outputStream: WriteStream
+  continueRun?: (context: AgentTaskContinuationContext) => Promise<void>
+  transcriptPath?: string
 }
 
 type OutputBackedTask = ShellTask | AgentTask
@@ -72,12 +77,15 @@ export interface TaskSnapshot {
   exitCode?: number | null
   signal?: NodeJS.Signals | null
   error?: string
+  continuationAvailable?: boolean
+  transcriptPath?: string
 }
 
 export interface StartShellTaskInput {
   command: string
   cwd?: unknown
   description?: string
+  context?: AgentRuntimeContext
 }
 
 export interface AgentTaskContext {
@@ -87,9 +95,15 @@ export interface AgentTaskContext {
   updateActivity(activity: string): void
 }
 
+export interface AgentTaskContinuationContext extends AgentTaskContext {
+  prompt: string
+}
+
 export interface StartAgentTaskInput {
   description?: string
   run: (context: AgentTaskContext) => Promise<void>
+  continueRun?: (context: AgentTaskContinuationContext) => Promise<void>
+  transcriptPath?: string
 }
 
 const tasks = new Map<string, BackgroundTask>()
@@ -99,7 +113,7 @@ export async function startShellTask(input: StartShellTaskInput): Promise<TaskSn
   const command = input.command.trim()
   if (!command) throw new Error('command 不能为空')
 
-  const resolvedCwd = await resolveWorkingDirectory(input.cwd)
+  const resolvedCwd = await resolveWorkingDirectory(input.cwd, input.context)
   await mkdir(TASK_OUTPUT_DIR, { recursive: true })
 
   registerProcessCleanup()
@@ -123,6 +137,7 @@ export async function startShellTask(input: StartShellTaskInput): Promise<TaskSn
     startTime: now,
     outputPath,
     outputBytes: 0,
+    outputTextTail: '',
     lastOutputAt: now,
     lastActivity: `started: ${command}`,
     command,
@@ -169,6 +184,7 @@ export async function startAgentTask(input: StartAgentTaskInput): Promise<TaskSn
 
   const id = createTaskId('agent')
   const outputPath = join(TASK_OUTPUT_DIR, `${id}.log`)
+  const transcriptPath = input.transcriptPath ?? (input.continueRun ? join(TASK_OUTPUT_DIR, `${id}.messages.jsonl`) : undefined)
   const outputStream = createWriteStream(outputPath, { flags: 'a' })
   const now = Date.now()
   const task: AgentTask = {
@@ -179,10 +195,13 @@ export async function startAgentTask(input: StartAgentTaskInput): Promise<TaskSn
     startTime: now,
     outputPath,
     outputBytes: 0,
+    outputTextTail: '',
     lastOutputAt: now,
     lastActivity: 'started background agent',
     abortController: new AbortController(),
     outputStream,
+    continueRun: input.continueRun,
+    transcriptPath,
   }
   tasks.set(id, task)
 
@@ -215,13 +234,38 @@ export async function readTaskOutput(taskId: string, options: {
 
   const latest = tasks.get(taskId) ?? task
   const timedOut = Boolean(options.block && latest.status === 'running')
-  const output = await readTail(latest.outputPath, options.maxChars ?? DEFAULT_MAX_OUTPUT_CHARS)
+  const output = readTaskOutputTail(latest, options.maxChars ?? DEFAULT_MAX_OUTPUT_CHARS)
+    ?? await readTail(latest.outputPath, options.maxChars ?? DEFAULT_MAX_OUTPUT_CHARS)
 
   return {
     snapshot: snapshotTask(latest),
     output,
     retrievalStatus: timedOut ? 'timeout' : 'success',
   }
+}
+
+export async function continueAgentTask(taskId: string, prompt: string): Promise<TaskSnapshot> {
+  const task = tasks.get(taskId)
+  if (!task) throw new Error(`找不到 task：${taskId}`)
+  if (task.kind !== 'agent') throw new Error(`task ${taskId} 的类型 ${task.kind} 不能继续对话`)
+  if (!task.continueRun) throw new Error(`task ${taskId} 没有可用的 continuation handler`)
+  if (task.status === 'running') throw new Error(`task ${taskId} 仍在 running，请等待完成或先停止`)
+  if (!prompt.trim()) throw new Error('continuation prompt 不能为空')
+
+  task.status = 'running'
+  task.endTime = undefined
+  task.error = undefined
+  task.exitCode = undefined
+  task.signal = undefined
+  task.abortController = new AbortController()
+  task.outputStream = createWriteStream(task.outputPath, { flags: 'a' })
+  task.lastOutputAt = Date.now()
+  task.lastActivity = 'continued background agent'
+
+  appendTaskOutput(task, `\n[agent task continued]\n${prompt.trim()}\n\n`)
+  void runAgentTask(task, context => task.continueRun!({ ...context, prompt: prompt.trim() }))
+
+  return snapshotTask(task)
 }
 
 export async function stopTask(taskId: string): Promise<TaskSnapshot> {
@@ -285,6 +329,9 @@ function snapshotTask(task: BackgroundTask): TaskSnapshot {
   if (task.kind === 'shell') {
     snapshot.command = task.command
     snapshot.cwd = task.cwd
+  } else {
+    snapshot.continuationAvailable = Boolean(task.continueRun)
+    snapshot.transcriptPath = task.transcriptPath
   }
 
   return snapshot
@@ -294,9 +341,21 @@ function appendTaskOutput(task: OutputBackedTask, chunk: string | Buffer): void 
   const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk
   if (!text) return
   task.outputBytes += Buffer.byteLength(text)
+  task.outputTextTail = boundedTail(`${task.outputTextTail}${text}`, MEMORY_OUTPUT_TAIL_CHARS)
   task.lastOutputAt = Date.now()
   task.lastActivity = lastMeaningfulLine(text) ?? task.lastActivity
   task.outputStream.write(text)
+}
+
+function readTaskOutputTail(task: BackgroundTask, maxChars: number): string | null {
+  if (!task.outputTextTail) return null
+  return task.outputTextTail.length > maxChars
+    ? `[output truncated to last ${maxChars.toLocaleString()} chars]\n${task.outputTextTail.slice(-maxChars)}`
+    : task.outputTextTail
+}
+
+function boundedTail(text: string, maxChars: number): string {
+  return text.length > maxChars ? text.slice(-maxChars) : text
 }
 
 async function runAgentTask(

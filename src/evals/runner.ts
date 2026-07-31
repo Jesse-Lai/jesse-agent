@@ -19,12 +19,15 @@ import type { LLMStreamer, Message, ToolCall } from '../llm.js'
 import type { Tool } from '../types.js'
 import { setPermissionMode } from '../permissionMode.js'
 import { rememberSessionAllowRule } from '../permissions.js'
-import { getOriginalProjectRoot, setProjectRoot } from '../workingDirectory.js'
+import { getOriginalProjectRoot, getProjectRoot, setProjectRoot } from '../workingDirectory.js'
 import { editFileTool } from '../tools/editFile.js'
 import { readFileTool } from '../tools/readFile.js'
 import { runCommandTool } from '../tools/runCommand.js'
+import { writeFileTool } from '../tools/writeFile.js'
+import { taskContinueTool } from '../tools/taskContinue.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
 import { readTaskOutput, startAgentTask } from '../tasks.js'
+import { createAgentRuntimeContext } from '../runtimeContext.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
 const execFileAsync = promisify(execFile)
@@ -54,6 +57,9 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runReadEditVerifyEval,
     runAgentWorktreeIsolationEval,
     runBackgroundAgentTaskEval,
+    runPerAgentRuntimeContextEval,
+    runBackgroundAgentWorktreeContextEval,
+    runBackgroundAgentContinuationEval,
   ]
 
   const results: EvalResult[] = []
@@ -199,6 +205,120 @@ async function runBackgroundAgentTaskEval(): Promise<EvalResult> {
     check(checks, 'task completed successfully', result.snapshot.status === 'completed', result.snapshot.status)
     check(checks, 'task output includes progress', result.output.includes('agent progress: started'), result.output)
     check(checks, 'task output includes final report text', result.output.includes('agent final: done'), result.output)
+  })
+}
+
+async function runPerAgentRuntimeContextEval(): Promise<EvalResult> {
+  const root = await mkdtemp(join(tmpdir(), 'jesse-eval-agent-context-'))
+  const parentRoot = join(root, 'parent')
+  const childRoot = join(root, 'child')
+  await mkdir(parentRoot, { recursive: true })
+  await mkdir(childRoot, { recursive: true })
+  await writeFile(join(parentRoot, 'marker.txt'), 'parent root\n', 'utf8')
+  await writeFile(join(childRoot, 'marker.txt'), 'child context root\n', 'utf8')
+  const realParentRoot = await realpath(parentRoot)
+  const realChildRoot = await realpath(childRoot)
+
+  return runCase('per-agent-runtime-context', async checks => {
+    await setProjectRoot(realParentRoot)
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-child-context',
+      projectRoot: realChildRoot,
+      cwd: realChildRoot,
+      originalProjectRoot: realParentRoot,
+    })
+    const script: ScriptedStep[] = [
+      { type: 'tool_calls', calls: [{ name: 'read_file', args: { path: 'marker.txt' } }] },
+      { type: 'text', text: 'Read marker from isolated agent context.\nVERDICT: PASS' },
+    ]
+
+    const steps = [...script]
+    const events: AgentEvent[] = []
+    for await (const event of runAgent([
+      { role: 'user', content: 'Read marker.txt from your context root.' },
+    ], {
+      tools: [readFileTool],
+      maxTurns: script.length + 1,
+      llmStream: createScriptedLLM(steps),
+      context,
+    })) {
+      events.push(event)
+    }
+
+    const result = toolResult(events, 'read_file')
+    check(checks, 'read_file used child context root', Boolean(result?.content.includes('child context root')), result?.content)
+    check(checks, 'read_file did not read parent root', !Boolean(result?.content.includes('parent root')), result?.content)
+    check(checks, 'global project root stayed on parent', getProjectRoot() === realParentRoot, getProjectRoot())
+    check(checks, 'script consumed every fake model step', steps.length === 0, `${steps.length} unused step(s)`)
+  }, root)
+}
+
+async function runBackgroundAgentWorktreeContextEval(): Promise<EvalResult> {
+  const root = await createGitProject('background-agent-worktree')
+
+  return runCase('background-agent-worktree-context', async checks => {
+    await setProjectRoot(root)
+    const session = await createAgentWorktree({
+      agentId: 'eval-background-worktree',
+      baseProjectRoot: root,
+    })
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-background-worktree',
+      projectRoot: session.worktreePath,
+      cwd: session.worktreePath,
+      originalProjectRoot: root,
+      worktreeSession: session,
+    })
+
+    const started = await startAgentTask({
+      description: 'eval background worktree agent',
+      run: async task => {
+        task.write(`worktree path: ${session.worktreePath}\n`)
+        const writeResult = await writeFileTool.execute({
+          path: 'agent-output.txt',
+          content: 'background worktree change\n',
+        }, context)
+        task.write(`${writeResult}\n`)
+        const cleanup = await finishAgentWorktree(session)
+        task.write(`Worktree status: ${cleanup.status}\n`)
+        task.write(`Worktree changes: ${cleanup.changedFiles} file(s), ${cleanup.commits} commit(s)\n`)
+      },
+    })
+
+    const result = await readTaskOutput(started.id, { block: true, timeoutMs: 1_000 })
+
+    check(checks, 'task started as agent kind', started.kind === 'agent', started.kind)
+    check(checks, 'background worktree task completed', result.snapshot.status === 'completed', result.snapshot.status)
+    check(checks, 'worktree was kept because it changed files', result.output.includes('Worktree status: kept'), result.output)
+    check(checks, 'worktree change count was reported', result.output.includes('Worktree changes: 1 file(s)'), result.output)
+    check(checks, 'global project root stayed on parent repo', getProjectRoot() === root, getProjectRoot())
+  }, root)
+}
+
+async function runBackgroundAgentContinuationEval(): Promise<EvalResult> {
+  return runCase('background-agent-continuation', async checks => {
+    const started = await startAgentTask({
+      description: 'eval continuation agent',
+      run: async context => {
+        context.write('initial answer\n')
+      },
+      continueRun: async context => {
+        context.write(`continued answer: ${context.prompt}\n`)
+      },
+    })
+
+    const initial = await readTaskOutput(started.id, { block: true, timeoutMs: 1_000 })
+    const continuedText = await taskContinueTool.execute({
+      task_id: started.id,
+      prompt: 'follow up question',
+    })
+    const continued = await readTaskOutput(started.id, { block: true, timeoutMs: 1_000 })
+
+    check(checks, 'initial task completed', initial.snapshot.status === 'completed', initial.snapshot.status)
+    check(checks, 'task reports continuation available', initial.snapshot.continuationAvailable === true, String(initial.snapshot.continuationAvailable))
+    check(checks, 'task_continue restarted same task', continuedText.includes(started.id), continuedText)
+    check(checks, 'continued task completed', continued.snapshot.status === 'completed', continued.snapshot.status)
+    check(checks, 'continued output includes follow-up', continued.output.includes('continued answer: follow up question'), continued.output)
   })
 }
 

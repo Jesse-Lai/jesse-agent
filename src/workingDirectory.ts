@@ -13,6 +13,7 @@
 import { realpathSync } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
+import type { AgentRuntimeContext } from './runtimeContext.js'
 
 const originalProjectRoot = realpathSync(process.cwd())
 let activeProjectRoot = originalProjectRoot
@@ -26,9 +27,12 @@ export interface ResolvedWorkingDirectory {
   projectRoot: string
 }
 
-export async function resolveWorkingDirectory(input: unknown): Promise<ResolvedWorkingDirectory> {
+export async function resolveWorkingDirectory(
+  input: unknown,
+  context?: AgentRuntimeContext,
+): Promise<ResolvedWorkingDirectory> {
   const rawCwd = normalizeCwdInput(input)
-  const projectRoot = getProjectRoot()
+  const projectRoot = context?.projectRoot ?? getProjectRoot()
   const requestedPath = isAbsolute(rawCwd) ? rawCwd : resolve(projectRoot, rawCwd)
 
   let realRequestedPath: string
@@ -43,13 +47,13 @@ export async function resolveWorkingDirectory(input: unknown): Promise<ResolvedW
     throw new Error(`cwd 不是目录：${rawCwd}`)
   }
 
-  if (!isInsideProjectRoot(realRequestedPath)) {
+  if (!isInsideProjectRoot(realRequestedPath, context)) {
     throw new Error(`cwd 必须位于项目目录内：${rawCwd}`)
   }
 
   return {
     absolutePath: realRequestedPath,
-    displayPath: toProjectRelativePath(realRequestedPath),
+    displayPath: toProjectRelativePath(realRequestedPath, context),
     projectRoot,
   }
 }
@@ -69,18 +73,18 @@ export async function setProjectRoot(path: string): Promise<void> {
   activeProjectRoot = realPath
 }
 
-export function isPathWithinProjectRoot(input: unknown): boolean {
+export function isPathWithinProjectRoot(input: unknown, context?: AgentRuntimeContext): boolean {
   if (typeof input !== 'string') return false
   const trimmed = input.trim()
   if (!trimmed || trimmed.includes('\0')) return false
 
-  const projectRoot = getProjectRoot()
+  const projectRoot = context?.projectRoot ?? getProjectRoot()
   const requestedPath = isAbsolute(trimmed) ? trimmed : resolve(projectRoot, trimmed)
-  return isInsideProjectRoot(requestedPath)
+  return isInsideProjectRoot(requestedPath, context)
 }
 
-export function resolveToolPath(path: string): string {
-  return isAbsolute(path) ? path : resolve(getProjectRoot(), path)
+export function resolveToolPath(path: string, context?: AgentRuntimeContext): string {
+  return isAbsolute(path) ? path : resolve(context?.projectRoot ?? getProjectRoot(), path)
 }
 
 function normalizeCwdInput(input: unknown): string {
@@ -94,14 +98,14 @@ function normalizeCwdInput(input: unknown): string {
   return trimmed
 }
 
-function isInsideProjectRoot(candidate: string): boolean {
-  const projectRoot = getProjectRoot()
+function isInsideProjectRoot(candidate: string, context?: AgentRuntimeContext): boolean {
+  const projectRoot = context?.projectRoot ?? getProjectRoot()
   const rel = relative(projectRoot, candidate)
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
-function toProjectRelativePath(candidate: string): string {
-  const projectRoot = getProjectRoot()
+function toProjectRelativePath(candidate: string, context?: AgentRuntimeContext): string {
+  const projectRoot = context?.projectRoot ?? getProjectRoot()
   const rel = relative(projectRoot, candidate)
   return rel === '' ? '.' : rel
 }

@@ -123,7 +123,9 @@ Sub-agents can also run in the background:
 Use the explore sub-agent with run_in_background=true to map the auth flow. Return the task id, then continue with the main task.
 ```
 
-Background sub-agents return a `task_id` immediately. Use `task_list`, `task_output`, and `task_stop` to inspect progress, read the final report, or cancel the run. This is the thin Claude Code-style async slice: the task registry now supports `kind: shell | agent`, but interactive continuation/resume for background agents is intentionally deferred.
+Background sub-agents return a `task_id` immediately. Use `task_list`, `task_output`, and `task_stop` to inspect progress, read the final report, or cancel the run. Use `task_continue` to append a follow-up prompt to a completed background agent in the current process. Agent transcripts are written to `.jesse/task-output/<task-id>.messages.jsonl` as the foundation for future cross-process resume.
+
+Each agent run carries an `AgentRuntimeContext` with its own `agentId`, `projectRoot`, `cwd`, original root, and optional worktree metadata. The loop passes that context through the tool executor into file, shell, search, background shell, and skill-loading tools. This keeps sub-agents from relying on process-global cwd and lets background worktree agents run without moving the parent session.
 
 Sub-agents can also run in an isolated git worktree:
 
@@ -131,7 +133,7 @@ Sub-agents can also run in an isolated git worktree:
 Use the general sub-agent with isolation="worktree" to make the risky refactor, then report the worktree path and branch.
 ```
 
-The synchronous worktree path follows Claude Code's shape: the agent tool accepts `isolation: "worktree"` and returns `Worktree path`, `Worktree branch`, `Worktree status`, and change counts. If the sub-agent makes no changes, the worktree is removed automatically; if it changes files or creates commits, the worktree is kept. Background sub-agents cannot yet combine with `isolation: "worktree"`; that requires a stronger per-agent working-directory context instead of the current process-level project root.
+The worktree path follows Claude Code's shape: the agent tool accepts `isolation: "worktree"` and returns `Worktree path`, `Worktree branch`, `Worktree status`, and change counts. If the sub-agent makes no changes, the worktree is removed automatically; if it changes files or creates commits, the worktree is kept. This works for both synchronous and background sub-agents.
 
 ## Background Tasks
 

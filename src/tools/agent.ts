@@ -7,12 +7,14 @@
  * also register the same run as a background task.
  */
 
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type { Message } from '../llm.js'
 import type { AgentEvent } from '../loop.js'
 import type { Tool } from '../types.js'
+import { createAgentRuntimeContext, type AgentRuntimeContext } from '../runtimeContext.js'
 import { formatTaskDetails } from '../taskDisplay.js'
 import { startAgentTask, type TaskSnapshot } from '../tasks.js'
-import { getProjectRoot, setProjectRoot } from '../workingDirectory.js'
 import {
   createAgentWorktree,
   finishAgentWorktree,
@@ -27,6 +29,7 @@ import {
 } from '../agents.js'
 
 const DEFAULT_AGENT_TYPE = 'general'
+const TASK_OUTPUT_DIR = '.jesse/task-output'
 const ISOLATED_WORKTREE_BLOCKED_TOOLS = new Set([
   'run_background_command',
   'task_list',
@@ -47,7 +50,7 @@ export const agentTool: Tool = {
     'Available subagent_type values: explore, review, verify, general. ' +
     'Each sub-agent has its own isolated context and restricted tool pool. ' +
     'Set run_in_background=true to return a task_id immediately. ' +
-    'Set isolation="worktree" to run a synchronous sub-agent in an isolated git worktree.',
+    'Set isolation="worktree" to run the sub-agent in an isolated git worktree.',
 
   parameters: {
     type: 'object',
@@ -70,11 +73,11 @@ export const agentTool: Tool = {
       },
       isolation: {
         type: 'string',
-        description: 'Optional isolation mode. Use "worktree" to run this synchronous sub-agent in an isolated git worktree.',
+        description: 'Optional isolation mode. Use "worktree" to run this sub-agent in an isolated git worktree.',
       },
       run_in_background: {
         type: 'boolean',
-        description: 'Optional. If true, start the sub-agent as a background task and return task_id immediately. Not yet supported with isolation="worktree".',
+        description: 'Optional. If true, start the sub-agent as a background task and return task_id immediately.',
       },
     },
     required: ['prompt'],
@@ -82,19 +85,12 @@ export const agentTool: Tool = {
 
   isReadOnly: false,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const isolation = parseIsolation(args.isolation)
     if (isolation instanceof Error) return `错误：${isolation.message}`
     const runInBackground = args.run_in_background === true
-    if (runInBackground && isolation === 'worktree') {
-      return [
-        '错误：run_in_background=true 暂时不能和 isolation="worktree" 同时使用。',
-        '原因：当前 worktree project root 还是进程级状态，后台运行可能影响主 agent 的文件工具。',
-        '请先去掉 run_in_background 同步运行，或去掉 isolation 使用普通后台 sub-agent。',
-      ].join('\n')
-    }
 
-    const prepared = await prepareAgentRun(args, isolation)
+    const prepared = await prepareAgentRun(args, isolation, context)
     if (typeof prepared === 'string') return prepared
 
     if (runInBackground) {
@@ -106,7 +102,20 @@ export const agentTool: Tool = {
             signal: context.signal,
             onEvent: event => writeBackgroundAgentEvent(context.write, event),
           })
+          await writeAgentTranscript(context.taskId, prepared.messages)
           context.write('\n--- final report ---\n')
+          context.write(formatAgentResult(result))
+          context.write('\n')
+        },
+        continueRun: async context => {
+          prepared.messages.push({ role: 'user', content: context.prompt })
+          context.write(formatBackgroundAgentContinuationHeader(prepared, context.taskId, context.prompt))
+          const result = await runPreparedAgent(prepared, {
+            signal: context.signal,
+            onEvent: event => writeBackgroundAgentEvent(context.write, event),
+          })
+          await writeAgentTranscript(context.taskId, prepared.messages)
+          context.write('\n--- continued final report ---\n')
           context.write(formatAgentResult(result))
           context.write('\n')
         },
@@ -125,6 +134,7 @@ interface PreparedAgentRun {
   maxTurns: number
   subAgentTools: Tool[]
   messages: Message[]
+  runtimeContext: AgentRuntimeContext
   isolation: AgentIsolation | undefined
   worktreeSession: WorktreeSession | null
 }
@@ -145,6 +155,7 @@ interface AgentRunResult {
 async function prepareAgentRun(
   args: Record<string, unknown>,
   isolation: AgentIsolation | undefined,
+  parentContext?: AgentRuntimeContext,
 ): Promise<PreparedAgentRun | string> {
   const prompt = String(args.prompt ?? '').trim()
   if (!prompt) return '错误：未提供 prompt 参数。'
@@ -163,13 +174,25 @@ async function prepareAgentRun(
   const { getAllTools } = await import('./index.js')
   const subAgentTools = filterToolsForIsolation(resolveAgentTools(agent, getAllTools()), isolation)
   const maxTurns = parseMaxTurns(args.max_turns, agent.maxTurns)
-  const parentProjectRoot = getProjectRoot()
+  const resolvedParentContext = parentContext ?? createAgentRuntimeContext()
+  const parentProjectRoot = resolvedParentContext.projectRoot
   const agentId = createAgentId(agent.agentType)
   let worktreeSession: WorktreeSession | null = null
 
   if (isolation === 'worktree') {
-    worktreeSession = await createAgentWorktree({ agentId })
+    worktreeSession = await createAgentWorktree({
+      agentId,
+      baseProjectRoot: resolvedParentContext.projectRoot,
+    })
   }
+
+  const runtimeContext = createAgentRuntimeContext({
+    agentId,
+    projectRoot: worktreeSession?.worktreePath ?? resolvedParentContext.projectRoot,
+    cwd: worktreeSession?.worktreePath ?? resolvedParentContext.cwd,
+    originalProjectRoot: resolvedParentContext.originalProjectRoot,
+    worktreeSession,
+  })
 
   const messages: Message[] = [
     {
@@ -188,6 +211,7 @@ async function prepareAgentRun(
     maxTurns,
     subAgentTools,
     messages,
+    runtimeContext,
     isolation,
     worktreeSession,
   }
@@ -209,25 +233,24 @@ async function runPreparedAgent(
   const errors: string[] = []
 
   try {
-    await withProjectRoot(prepared.worktreeSession?.worktreePath ?? null, async () => {
-      for await (const event of runAgent(prepared.messages, {
-        tools: prepared.subAgentTools,
-        maxTurns: prepared.maxTurns,
-        signal: options.signal,
-      })) {
-        options.onEvent?.(event)
-        if (event.type === 'tool_start') {
-          toolCalls.push(event.name)
-        } else if (event.type === 'assistant_text') {
-          finalText = event.text
-        } else if (event.type === 'error') {
-          terminalStatus = 'error'
-          errors.push(event.reason)
-        } else if (event.type === 'max_turns') {
-          terminalStatus = 'max_turns'
-        }
+    for await (const event of runAgent(prepared.messages, {
+      tools: prepared.subAgentTools,
+      maxTurns: prepared.maxTurns,
+      signal: options.signal,
+      context: prepared.runtimeContext,
+    })) {
+      options.onEvent?.(event)
+      if (event.type === 'tool_start') {
+        toolCalls.push(event.name)
+      } else if (event.type === 'assistant_text') {
+        finalText = event.text
+      } else if (event.type === 'error') {
+        terminalStatus = 'error'
+        errors.push(event.reason)
+      } else if (event.type === 'max_turns') {
+        terminalStatus = 'max_turns'
       }
-    })
+    }
   } finally {
     if (prepared.worktreeSession) {
       try {
@@ -353,21 +376,6 @@ function formatAgentResult({
   return lines.join('\n')
 }
 
-async function withProjectRoot<T>(projectRoot: string | null, fn: () => Promise<T>): Promise<T> {
-  if (!projectRoot) return await fn()
-
-  const previousProjectRoot = getProjectRoot()
-  const previousCwd = process.cwd()
-  process.chdir(projectRoot)
-  await setProjectRoot(projectRoot)
-  try {
-    return await fn()
-  } finally {
-    process.chdir(previousCwd)
-    await setProjectRoot(previousProjectRoot)
-  }
-}
-
 function createAgentId(agentType: string): string {
   const stamp = new Date()
     .toISOString()
@@ -395,10 +403,28 @@ function formatStartedAgentTask(task: TaskSnapshot): string {
 function formatBackgroundAgentHeader(prepared: PreparedAgentRun, taskId: string): string {
   return [
     `task_id: ${taskId}`,
+    `transcript_path: ${agentTranscriptPath(taskId)}`,
     `sub_agent: ${prepared.agentType}`,
     `description: ${prepared.description}`,
     `max_turns: ${prepared.maxTurns}`,
     `tools: ${prepared.subAgentTools.map(tool => tool.name).join(', ')}`,
+    '',
+    '--- progress ---',
+  ].join('\n') + '\n'
+}
+
+function formatBackgroundAgentContinuationHeader(
+  prepared: PreparedAgentRun,
+  taskId: string,
+  prompt: string,
+): string {
+  return [
+    '',
+    '--- continuation ---',
+    `task_id: ${taskId}`,
+    `transcript_path: ${agentTranscriptPath(taskId)}`,
+    `sub_agent: ${prepared.agentType}`,
+    `prompt: ${previewText(prompt, 1_000)}`,
     '',
     '--- progress ---',
   ].join('\n') + '\n'
@@ -434,6 +460,17 @@ function previewText(text: string, maxChars: number): string {
   const trimmed = text.trim()
   if (trimmed.length <= maxChars) return trimmed
   return `${trimmed.slice(0, maxChars)}...`
+}
+
+async function writeAgentTranscript(taskId: string, messages: Message[]): Promise<void> {
+  const path = agentTranscriptPath(taskId)
+  await mkdir(dirname(path), { recursive: true })
+  const jsonl = messages.map(message => JSON.stringify(message)).join('\n')
+  await writeFile(path, `${jsonl}\n`, 'utf8')
+}
+
+function agentTranscriptPath(taskId: string): string {
+  return join(TASK_OUTPUT_DIR, `${taskId}.messages.jsonl`)
 }
 
 function summarizeToolCalls(toolCalls: string[]): string {

@@ -202,6 +202,9 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
             <div class="step" data-status="done"><div class="s-title">Step 26 · Evaluation Harness</div><div class="s-desc">npm run eval，用 scripted LLM 驱动真实 loop，检查校验、安全、编辑和验证行为</div><div class="s-file">src/evals/runner.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 27 · Coding Interfaces</div><div class="s-desc">CLI renderer、工具活动摘要、edit/write diff、/diff、/sessions、文件链接和 task progress</div><div class="s-file">src/cliRenderer.ts · src/diff.ts · src/gitDiff.ts · src/taskDisplay.ts</div><span class="tag">complete slice</span></div>
             <div class="step" data-status="done"><div class="s-title">Step 28 · Background Sub-agents</div><div class="s-desc">agent 支持 run_in_background=true，返回 task_id；task_output 读取进度和最终报告</div><div class="s-file">src/tools/agent.ts · src/tasks.ts</div><span class="tag">thin Claude Code slice</span></div>
+            <div class="step" data-status="done"><div class="s-title">Step 29 · Per-Agent Context</div><div class="s-desc">每个 agent 有自己的 projectRoot/cwd；工具执行不再依赖全局 cwd 切换</div><div class="s-file">src/runtimeContext.ts · src/loop.ts · executor.ts</div><span class="tag">foundation</span></div>
+            <div class="step" data-status="done"><div class="s-title">Step 30 · Background Worktree Agents</div><div class="s-desc">后台 sub-agent 可组合 isolation=&quot;worktree&quot;，并按改动状态自动清理或保留</div><div class="s-file">src/tools/agent.ts · src/worktrees.ts</div><span class="tag">parallel coding</span></div>
+            <div class="step" data-status="done"><div class="s-title">Step 31 · Background Agent Continuation</div><div class="s-desc">task_continue 可追问已完成后台 agent；messages 写入 task transcript 文件</div><div class="s-file">src/tools/taskContinue.ts · src/tasks.ts</div><span class="tag">resume foundation</span></div>
         </div>
     </div>
 

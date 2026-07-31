@@ -16,6 +16,7 @@
  */
 
 import type { Tool } from '../types.js'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import { findTool } from './index.js'
 import { confirm } from '../confirm.js'
 import { budgetToolResult } from '../contextBudget.js'
@@ -32,6 +33,7 @@ export interface ExecuteResult {
 
 export interface ExecuteToolOptions {
   tools?: Tool[]
+  context?: AgentRuntimeContext
 }
 
 // ============================================================================
@@ -48,7 +50,11 @@ export interface ExecuteToolOptions {
  * 不合法时返回错误文本给模型，而不是执行工具。这样模型能看到
  * "错在哪里"，下一轮自己修正参数。
  */
-async function validate(tool: Tool, args: Record<string, unknown>): Promise<ExecuteResult | null> {
+async function validate(
+  tool: Tool,
+  args: Record<string, unknown>,
+  context?: AgentRuntimeContext,
+): Promise<ExecuteResult | null> {
   const errors: string[] = []
   const required = tool.parameters.required ?? []
 
@@ -81,7 +87,7 @@ async function validate(tool: Tool, args: Record<string, unknown>): Promise<Exec
 
   if (errors.length === 0 && isShellCommandTool(tool.name)) {
     try {
-      await resolveWorkingDirectory(args.cwd)
+      await resolveWorkingDirectory(args.cwd, context)
     } catch (err) {
       errors.push(`参数 "cwd" 不合法：${err instanceof Error ? err.message : String(err)}`)
     }
@@ -144,7 +150,11 @@ function describeValueType(value: unknown): string {
  *   - 危险工具（run_command 等）：先查权限规则，再视情况问用户 y/a/n。
  *     y → 放行一次；a → 本次会话记住 allow 规则；n → 返回"用户拒绝"给模型。
  */
-async function permission(tool: Tool, args: Record<string, unknown>): Promise<ExecuteResult | null> {
+async function permission(
+  tool: Tool,
+  args: Record<string, unknown>,
+  context?: AgentRuntimeContext,
+): Promise<ExecuteResult | null> {
   const mode = getPermissionMode()
 
   if (mode === 'bypassPermissions') {
@@ -160,7 +170,7 @@ async function permission(tool: Tool, args: Record<string, unknown>): Promise<Ex
   if (tool.isReadOnly) return null
 
   if (mode === 'acceptEdits' && isFileEditTool(tool.name)) {
-    if (isPathWithinProjectRoot(args.path)) {
+    if (isPathWithinProjectRoot(args.path, context)) {
       console.log(`\n✅ ${permissionModeTitle(mode)} 模式：自动允许项目内文件编辑工具 ${tool.name}。`)
       return null
     }
@@ -266,6 +276,13 @@ function describeDangerousAction(toolName: string, args: Record<string, unknown>
     return `即将停止后台任务：${String(args.task_id ?? '')}`
   }
 
+  if (toolName === 'task_continue') {
+    return [
+      `即将继续后台 agent task：${String(args.task_id ?? '')}`,
+      `prompt：${previewText(String(args.prompt ?? ''), 500)}`,
+    ].join('\n')
+  }
+
   if (toolName === 'enter_worktree') {
     return [
       '即将创建并进入隔离 git worktree。',
@@ -299,8 +316,12 @@ function lineCount(content: string): number {
 /**
  * 第 3 步 · call —— 真正执行工具。
  */
-async function call(tool: Tool, args: Record<string, unknown>): Promise<ExecuteResult> {
-  const content = await tool.execute(args)
+async function call(
+  tool: Tool,
+  args: Record<string, unknown>,
+  context?: AgentRuntimeContext,
+): Promise<ExecuteResult> {
+  const content = await tool.execute(args, context)
   return { ok: true, content: await budgetToolResult(tool.name, content) }
 }
 
@@ -333,15 +354,15 @@ export async function executeTool(
   // 一条错误结果喂回模型，而不是让整个 agentic loop 崩掉。
   try {
     // 第 1 步：校验。任一步返回非 null，就在此中止并把结果交出去。
-    const validateResult = await validate(tool, args)
+    const validateResult = await validate(tool, args, options.context)
     if (validateResult) return validateResult
 
     // 第 2 步：权限。
-    const permissionResult = await permission(tool, args)
+    const permissionResult = await permission(tool, args, options.context)
     if (permissionResult) return permissionResult
 
     // 第 3 步：执行。
-    return await call(tool, args)
+    return await call(tool, args, options.context)
   } catch (err) {
     return {
       ok: false,

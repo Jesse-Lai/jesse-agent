@@ -8,6 +8,7 @@
  */
 
 import { writeFile } from 'node:fs/promises'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { normalizeToolPath, refreshReadFile, requireFreshRead } from './readState.js'
 
@@ -31,7 +32,7 @@ export const editFileTool: Tool = {
 
   isReadOnly: false,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const path = String(args.path ?? '').trim()
     const oldString = String(args.old_string ?? '')
     const newString = String(args.new_string ?? '')
@@ -40,7 +41,7 @@ export const editFileTool: Tool = {
     if (!path) return '错误：未提供 path 参数'
     if (oldString === newString) return '编辑被拒绝：old_string 和 new_string 完全相同。'
 
-    const readCheck = await requireFreshRead(path)
+    const readCheck = await requireFreshRead(path, context)
     if (typeof readCheck === 'string') return `编辑被拒绝：${readCheck}`
 
     const content = readCheck.content
@@ -64,9 +65,9 @@ export const editFileTool: Tool = {
       : content.replace(oldString, newString)
 
     try {
-      const normalizedPath = normalizeToolPath(path)
+      const normalizedPath = normalizeToolPath(path, context)
       await writeFile(normalizedPath, updated, 'utf8')
-      await refreshReadFile(normalizedPath, updated)
+      await refreshReadFile(normalizedPath, updated, context)
 
       const replaced = replaceAll ? matches : 1
       return [

@@ -12,6 +12,8 @@ export function formatTaskLine(task: TaskSnapshot): string {
   lines.push(`  description: ${task.description}`)
   if (task.command) lines.push(`  command: ${task.command}`)
   if (task.cwd) lines.push(`  cwd: ${task.cwd}`)
+  if (task.continuationAvailable !== undefined) lines.push(`  continuation_available: ${task.continuationAvailable ? 'yes' : 'no'}`)
+  if (task.transcriptPath) lines.push(`  transcript_path: ${task.transcriptPath}`)
   if (task.lastActivity) lines.push(`  last: ${task.lastActivity}`)
   lines.push(`  output_path: ${task.outputPath}`)
   if (task.exitCode !== undefined) lines.push(`  exit_code: ${task.exitCode}`)
@@ -35,6 +37,8 @@ export function formatTaskDetails(task: TaskSnapshot, retrievalStatus?: string):
 
   if (task.command) lines.push(`command: ${task.command}`)
   if (task.cwd) lines.push(`cwd: ${task.cwd}`)
+  if (task.continuationAvailable !== undefined) lines.push(`continuation_available: ${task.continuationAvailable ? 'yes' : 'no'}`)
+  if (task.transcriptPath) lines.push(`transcript_path: ${task.transcriptPath}`)
   if (task.lastActivity) lines.push(`last_activity: ${task.lastActivity}`)
   if (task.exitCode !== undefined) lines.push(`exit_code: ${task.exitCode}`)
   if (task.signal) lines.push(`signal: ${task.signal}`)

@@ -106,9 +106,13 @@ export async function enterWorktree(input: { name?: unknown } = {}): Promise<Wor
   return session
 }
 
-export async function createAgentWorktree(input: { name?: unknown; agentId: string }): Promise<WorktreeSession> {
+export async function createAgentWorktree(input: {
+  name?: unknown
+  agentId: string
+  baseProjectRoot?: string
+}): Promise<WorktreeSession> {
   const name = normalizeWorktreeName(input.name, input.agentId)
-  return await createWorktreeSession(name, input.agentId, getProjectRoot())
+  return await createWorktreeSession(name, input.agentId, input.baseProjectRoot ?? getProjectRoot())
 }
 
 export async function finishAgentWorktree(session: WorktreeSession): Promise<AgentWorktreeCleanupResult> {

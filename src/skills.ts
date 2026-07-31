@@ -12,6 +12,7 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import type { AgentRuntimeContext } from './runtimeContext.js'
 import { getProjectRoot } from './workingDirectory.js'
 
 export const SKILL_DIRS = ['.jesse/skills', '.claude/skills'] as const
@@ -42,9 +43,9 @@ export interface SkillsContext {
   error?: string
 }
 
-export async function loadSkillsContext(): Promise<SkillsContext> {
+export async function loadSkillsContext(context?: AgentRuntimeContext): Promise<SkillsContext> {
   try {
-    const skills = await scanSkills()
+    const skills = await scanSkills(context)
     return {
       skillDirs: SKILL_DIRS,
       skills,
@@ -60,11 +61,11 @@ export async function loadSkillsContext(): Promise<SkillsContext> {
   }
 }
 
-export async function loadSkill(name: string): Promise<LoadedSkill | string> {
+export async function loadSkill(name: string, context?: AgentRuntimeContext): Promise<LoadedSkill | string> {
   const normalizedName = normalizeSkillName(name)
   if (!normalizedName) return '技能名不能为空。'
 
-  const skills = await scanSkills()
+  const skills = await scanSkills(context)
   const skill = skills.find(candidate => candidate.name === normalizedName)
   if (!skill) {
     const available = skills.length > 0 ? skills.map(s => s.name).join(', ') : '(none)'
@@ -72,15 +73,15 @@ export async function loadSkill(name: string): Promise<LoadedSkill | string> {
   }
 
   try {
-    const content = await readFile(join(getProjectRoot(), skill.path), 'utf8')
+    const content = await readFile(join(context?.projectRoot ?? getProjectRoot(), skill.path), 'utf8')
     return { ...skill, content }
   } catch (err) {
     return `读取技能 "${normalizedName}" 失败：${err instanceof Error ? err.message : String(err)}`
   }
 }
 
-export async function scanSkills(): Promise<SkillHeader[]> {
-  const nested = await Promise.all(SKILL_DIRS.map(scanSkillDir))
+export async function scanSkills(context?: AgentRuntimeContext): Promise<SkillHeader[]> {
+  const nested = await Promise.all(SKILL_DIRS.map(dir => scanSkillDir(dir, context)))
   const deduped = new Map<string, SkillHeader>()
 
   for (const skill of nested.flat()) {
@@ -92,8 +93,11 @@ export async function scanSkills(): Promise<SkillHeader[]> {
     .slice(0, MAX_SKILLS)
 }
 
-async function scanSkillDir(relativeDir: (typeof SKILL_DIRS)[number]): Promise<SkillHeader[]> {
-  const root = getProjectRoot()
+async function scanSkillDir(
+  relativeDir: (typeof SKILL_DIRS)[number],
+  context?: AgentRuntimeContext,
+): Promise<SkillHeader[]> {
+  const root = context?.projectRoot ?? getProjectRoot()
   const absoluteDir = join(root, relativeDir)
 
   let entries

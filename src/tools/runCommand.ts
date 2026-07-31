@@ -14,6 +14,7 @@
 
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { resolveWorkingDirectory } from '../workingDirectory.js'
 
@@ -43,11 +44,11 @@ export const runCommandTool: Tool = {
   // ⚠️ 非只读：会真实改动系统 → permission 阶段会按规则放行、拒绝或问用户 y/a/n。
   isReadOnly: false,
 
-  async execute(args) {
+  async execute(args, context?: AgentRuntimeContext) {
     const command = String(args.command ?? '')
     if (!command) return '错误：未提供 command 参数'
     try {
-      const cwd = await resolveWorkingDirectory(args.cwd)
+      const cwd = await resolveWorkingDirectory(args.cwd, context)
       const { stdout, stderr } = await execAsync(command, {
         cwd: cwd.absolutePath,
         timeout: TIMEOUT_MS,

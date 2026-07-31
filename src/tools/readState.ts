@@ -7,6 +7,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises'
+import type { AgentRuntimeContext } from '../runtimeContext.js'
 import { resolveToolPath } from '../workingDirectory.js'
 
 export interface ReadFileRecord {
@@ -17,12 +18,16 @@ export interface ReadFileRecord {
 
 const readFiles = new Map<string, ReadFileRecord>()
 
-export function normalizeToolPath(path: string): string {
-  return resolveToolPath(path)
+export function normalizeToolPath(path: string, context?: AgentRuntimeContext): string {
+  return resolveToolPath(path, context)
 }
 
-export async function rememberReadFile(path: string, content: string): Promise<void> {
-  const normalizedPath = normalizeToolPath(path)
+export async function rememberReadFile(
+  path: string,
+  content: string,
+  context?: AgentRuntimeContext,
+): Promise<void> {
+  const normalizedPath = normalizeToolPath(path, context)
   const fileStat = await stat(normalizedPath)
   readFiles.set(normalizedPath, {
     path: normalizedPath,
@@ -31,8 +36,11 @@ export async function rememberReadFile(path: string, content: string): Promise<v
   })
 }
 
-export async function requireFreshRead(path: string): Promise<ReadFileRecord | string> {
-  const normalizedPath = normalizeToolPath(path)
+export async function requireFreshRead(
+  path: string,
+  context?: AgentRuntimeContext,
+): Promise<ReadFileRecord | string> {
+  const normalizedPath = normalizeToolPath(path, context)
   const record = readFiles.get(normalizedPath)
   if (!record) {
     return `文件 ${path} 还没有被 read_file 读取过。请先读取文件内容，再写入或编辑。`
@@ -52,6 +60,10 @@ export async function requireFreshRead(path: string): Promise<ReadFileRecord | s
   return record
 }
 
-export async function refreshReadFile(path: string, content: string): Promise<void> {
-  await rememberReadFile(path, content)
+export async function refreshReadFile(
+  path: string,
+  content: string,
+  context?: AgentRuntimeContext,
+): Promise<void> {
+  await rememberReadFile(path, content, context)
 }
