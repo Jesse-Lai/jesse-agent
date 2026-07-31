@@ -27,7 +27,7 @@ export class CliRenderer {
 
   renderStartup(info: StartupInfo): void {
     console.log('Jesse-Agent')
-    console.log('  输入你的问题开始聊天；/plan 进入计划模式；/mode 查看权限；/compact 压缩上下文；exit 退出。')
+    console.log('  输入你的问题开始聊天；/plan 计划；/mode 权限；/compact 压缩；/diff 改动；/sessions 历史；exit 退出。')
     console.log(`  Session: ${info.sessionId}`)
     console.log(`  Mode: ${info.modeTitle}`)
 

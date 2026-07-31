@@ -123,6 +123,17 @@ export interface OpenedSession {
   resumed: boolean
 }
 
+export interface SessionSummary {
+  id: string
+  filePath: string
+  updatedAt: string
+  messageCount: number
+  userMessageCount: number
+  lastUserMessage: string | null
+  compacted: boolean
+  activeWorktreePath: string | null
+}
+
 /** 一个 JSONL 会话文件的轻量写入器。 */
 export class SessionTranscript {
   constructor(
@@ -201,6 +212,50 @@ export async function openSession(options: OpenSessionOptions): Promise<OpenedSe
   return { transcript, messages: [], worktreeSession: null, resumed: false }
 }
 
+export async function listSessionSummaries(limit = 12): Promise<SessionSummary[]> {
+  if (!existsSync(SESSION_DIR)) return []
+
+  const entries = await readdir(SESSION_DIR)
+  const files = entries.filter(entry => entry.endsWith('.jsonl'))
+  const summaries = await Promise.all(
+    files.map(async file => {
+      const filePath = join(SESSION_DIR, file)
+      return await summarizeSession(filePath)
+    }),
+  )
+
+  return summaries
+    .filter((summary): summary is SessionSummary => summary !== null)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+    .slice(0, Math.max(1, limit))
+}
+
+export async function formatSessionList(limit = 12): Promise<string> {
+  const sessions = await listSessionSummaries(limit)
+  if (sessions.length === 0) return '没有找到历史 session。'
+
+  const rows = sessions.map((session, index) => {
+    const title = previewLine(session.lastUserMessage ?? '(no user message)', 70)
+    const worktree = session.activeWorktreePath ? ` · worktree: ${session.activeWorktreePath}` : ''
+    const compacted = session.compacted ? ' · compacted' : ''
+    return [
+      `${String(index + 1).padStart(2, ' ')}. ${formatLocalTime(session.updatedAt)}`,
+      `    ${session.id}`,
+      `    messages: ${session.messageCount}, user: ${session.userMessageCount}${compacted}${worktree}`,
+      `    last: ${title}`,
+      `    resume: npm run dev -- --resume ${session.id}`,
+    ].join('\n')
+  })
+
+  return [
+    `最近 ${sessions.length} 个 session：`,
+    '',
+    ...rows,
+    '',
+    '继续最近一次：npm run dev -- --continue',
+  ].join('\n')
+}
+
 async function loadSessionState(filePath: string): Promise<{ messages: Message[]; worktreeSession: WorktreeSession | null }> {
   const raw = await readFile(filePath, 'utf8')
   const messages: Message[] = []
@@ -224,6 +279,83 @@ async function loadSessionState(filePath: string): Promise<{ messages: Message[]
   }
 
   return { messages, worktreeSession }
+}
+
+async function summarizeSession(filePath: string): Promise<SessionSummary | null> {
+  let raw: string
+  try {
+    raw = await readFile(filePath, 'utf8')
+  } catch {
+    return null
+  }
+
+  const fileInfo = await stat(filePath)
+  let messageCount = 0
+  let userMessageCount = 0
+  let lastUserMessage: string | null = null
+  let compacted = false
+  let updatedAt = fileInfo.mtime.toISOString()
+  let activeWorktreePath: string | null = null
+
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue
+
+    let record: SessionRecord
+    try {
+      record = JSON.parse(line) as SessionRecord
+    } catch {
+      continue
+    }
+
+    updatedAt = record.timestamp || updatedAt
+
+    if (record.type === 'message_appended') {
+      messageCount += 1
+      if (record.message.role === 'user') {
+        userMessageCount += 1
+        lastUserMessage = record.message.content ?? null
+      }
+    }
+
+    if (record.type === 'compact_boundary') {
+      compacted = true
+      messageCount = record.messages.length
+      userMessageCount = record.messages.filter(message => message.role === 'user').length
+      const lastUser = [...record.messages].reverse().find(message => message.role === 'user')
+      lastUserMessage = lastUser?.content ?? lastUserMessage
+    }
+
+    if (record.type === 'worktree_event') {
+      activeWorktreePath = record.action === 'entered' ? record.session?.worktreePath ?? null : null
+    }
+  }
+
+  return {
+    id: sessionIdFromPath(filePath),
+    filePath,
+    updatedAt,
+    messageCount,
+    userMessageCount,
+    lastUserMessage,
+    compacted,
+    activeWorktreePath,
+  }
+}
+
+function previewLine(text: string, maxChars: number): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars)}...`
+}
+
+function formatLocalTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+  ].join(' ')
 }
 
 function resolveSessionPath(idOrPath: string): string {

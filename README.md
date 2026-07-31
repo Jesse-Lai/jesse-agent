@@ -152,6 +152,19 @@ The first eval slice uses a scripted fake LLM to drive the real `runAgent()` loo
 
 Terminal display lives in `src/cliRenderer.ts`; the agent loop still only yields typed events. The renderer turns those events into coding-focused output: readable tool activity, command summaries, bounded result previews, and simplified inline diffs for file edits/writes. This keeps the core UI-agnostic while making the terminal experience easier to scan.
 
+Useful local commands:
+
+```text
+你 › /diff      # show current git status/stat/diff
+你 › /sessions  # list recent JSONL sessions and resume commands
+```
+
+List sessions without starting a new conversation:
+
+```bash
+npm run dev -- --sessions
+```
+
 ## License
 
 Private project.

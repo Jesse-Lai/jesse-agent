@@ -24,12 +24,13 @@ import { loadSkillsContext } from './skills.js'
 import { loadMcpRuntimeContext, type McpRuntimeContext } from './mcp.js'
 import { getPlanModeContext, initializePlanModeSession } from './planMode.js'
 import { setExternalTools } from './tools/index.js'
-import { openSession, SessionTranscript, type SessionEndReason } from './session.js'
+import { formatSessionList, openSession, SessionTranscript, type SessionEndReason } from './session.js'
 import { compactMessages } from './compaction.js'
 import { contextWarning, estimateContextChars } from './contextBudget.js'
 import { stopAllRunningTasks } from './tasks.js'
 import { getCurrentWorktreeSession, initializeWorktreeRuntime, restoreWorktreeSession } from './worktrees.js'
 import { createCliRenderer } from './cliRenderer.js'
+import { formatGitDiff } from './gitDiff.js'
 import {
   getPermissionMode,
   parsePermissionMode,
@@ -58,6 +59,7 @@ const VERBOSE =
 
 const RESUME_SESSION = argValue('--resume')
 const CONTINUE_SESSION = process.argv.includes('--continue')
+const LIST_SESSIONS = process.argv.includes('--sessions')
 
 let activeSession: SessionTranscript | null = null
 let activeMcpRuntime: McpRuntimeContext | null = null
@@ -166,6 +168,11 @@ async function shutdown(reason: SessionEndReason): Promise<void> {
 // ============================================================================
 
 async function main(): Promise<void> {
+  if (LIST_SESSIONS) {
+    console.log(await formatSessionList())
+    return
+  }
+
   const renderer = createCliRenderer({ verbose: VERBOSE })
   activeMcpRuntime = await loadMcpRuntimeContext()
   setExternalTools(activeMcpRuntime.tools)
@@ -250,6 +257,16 @@ async function main(): Promise<void> {
       input === '/acceptEdits'
     ) {
       await handlePermissionModeCommand(input, messages)
+      continue
+    }
+
+    if (input === '/sessions') {
+      console.log(`\n${await formatSessionList()}\n`)
+      continue
+    }
+
+    if (input === '/diff') {
+      console.log(`\n${await formatGitDiff()}\n`)
       continue
     }
 
