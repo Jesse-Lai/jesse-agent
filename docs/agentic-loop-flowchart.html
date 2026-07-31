@@ -66,10 +66,10 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
 <div class="progress-wrap">
     <div class="progress-head">
         <span class="label">🛠️ jesse-agent Coding Agent 总进度</span>
-        <span class="count">Phase 1-7 ✅ · Phase 8 / Step 27 终端 slice ✅ · 7 / 8 阶段</span>
+        <span class="count">Phase 1-7 ✅ · Phase 8 / Step 31 后台 agent resume ✅ · 7 / 8 阶段</span>
     </div>
     <div class="progress-bar"><span style="width:91%;"></span></div>
-    <div class="progress-note">核心的 <b>agentic loop、工具管线、权限、会话、压缩、记忆、Skills、MCP、sub-agent、worktree、eval harness 和终端编码界面</b> 已经跑通。<b>Phase 8 / Step 27：Coding Interfaces</b> 的终端 slice 已完成；IDE integration 继续延后。右栏：✅ 已完成 · 🟠 当前阶段 · 灰色 = 待做。</div>
+    <div class="progress-note">核心的 <b>agentic loop、工具管线、权限、会话、压缩、记忆、Skills、MCP、sub-agent、worktree、eval harness、终端编码界面和后台 agent resume</b> 已经跑通。<b>Phase 8 / Step 31：Background Agent Continuation</b> 已完成；IDE integration 继续延后。右栏：✅ 已完成 · 🟠 当前阶段 · 灰色 = 待做。</div>
 </div>
 
 <div class="compare">
@@ -204,7 +204,7 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
             <div class="step" data-status="done"><div class="s-title">Step 28 · Background Sub-agents</div><div class="s-desc">agent 支持 run_in_background=true，返回 task_id；task_output 读取进度和最终报告</div><div class="s-file">src/tools/agent.ts · src/tasks.ts</div><span class="tag">thin Claude Code slice</span></div>
             <div class="step" data-status="done"><div class="s-title">Step 29 · Per-Agent Context</div><div class="s-desc">每个 agent 有自己的 projectRoot/cwd；工具执行不再依赖全局 cwd 切换</div><div class="s-file">src/runtimeContext.ts · src/loop.ts · executor.ts</div><span class="tag">foundation</span></div>
             <div class="step" data-status="done"><div class="s-title">Step 30 · Background Worktree Agents</div><div class="s-desc">后台 sub-agent 可组合 isolation=&quot;worktree&quot;，并按改动状态自动清理或保留</div><div class="s-file">src/tools/agent.ts · src/worktrees.ts</div><span class="tag">parallel coding</span></div>
-            <div class="step" data-status="done"><div class="s-title">Step 31 · Background Agent Continuation</div><div class="s-desc">task_continue 可追问已完成后台 agent；messages 写入 task transcript 文件</div><div class="s-file">src/tools/taskContinue.ts · src/tasks.ts</div><span class="tag">resume foundation</span></div>
+            <div class="step" data-status="done"><div class="s-title">Step 31 · Background Agent Continuation</div><div class="s-desc">task_continue 可追问已完成后台 agent；CLI 重启后可从 transcript + metadata 恢复</div><div class="s-file">src/tools/taskContinue.ts · src/tasks.ts · src/tools/agent.ts</div><span class="tag">resume</span></div>
         </div>
     </div>
 

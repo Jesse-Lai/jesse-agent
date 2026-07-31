@@ -348,7 +348,7 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Return `task_id` immediately and use `task_list` / `task_output` / `task_stop` for progress, output, and cancellation
 - [x] Write bounded progress events and the final sub-agent report to `.jesse/task-output/`
 - [x] Keep synchronous `isolation: "worktree"` intact, then enable `run_in_background=true` + `isolation: "worktree"` after adding per-agent runtime context
-- [x] Add current-process continuation for background sub-agents with `task_continue`
+- [x] Add current-process and cross-process continuation for background sub-agents with `task_continue`
 - [x] Add background sub-agent worktree isolation after the cwd/project-root model is fully scoped per agent
 - **Why:** Claude Code-style coding work benefits from parallel investigations, but async agent lifecycle should build on the existing task surface instead of creating a second task system.
 
@@ -371,10 +371,11 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 ### Step 31: Background Agent Continuation
 - [x] Add `task_continue` to append a new prompt to a completed background agent task
 - [x] Reuse the same background agent messages and `AgentRuntimeContext` when continuing within the current process
-- [x] Persist background agent messages to `.jesse/task-output/<task-id>.messages.jsonl` after each run as the foundation for future cross-process resume
+- [x] Persist background agent messages to `.jesse/task-output/<task-id>.messages.jsonl` and metadata to `.jesse/task-output/<task-id>.agent.json` after each run
 - [x] Show continuation availability and transcript path in task list/output details
 - [x] Add an eval proving `task_continue` restarts the same agent task and records continued output
-- [ ] Add full cross-process resume that can reload a background agent task after the CLI restarts
+- [x] Add full cross-process resume that can reload a background agent task after the CLI restarts
+- [x] Add an eval proving a disk-restored background agent can continue after the in-memory task registry is empty
 - **Why:** Claude Code-style background workers should be steerable after they finish, while keeping their intermediate context out of the parent conversation.
 
 ---

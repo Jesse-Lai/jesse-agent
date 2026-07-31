@@ -7,14 +7,14 @@
  * also register the same run as a background task.
  */
 
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { Message } from '../llm.js'
+import type { LLMStreamer, Message } from '../llm.js'
 import type { AgentEvent } from '../loop.js'
 import type { Tool } from '../types.js'
 import { createAgentRuntimeContext, type AgentRuntimeContext } from '../runtimeContext.js'
 import { formatTaskDetails } from '../taskDisplay.js'
-import { startAgentTask, type TaskSnapshot } from '../tasks.js'
+import { getTask, restoreAgentTask, startAgentTask, type AgentTaskContinuationContext, type TaskSnapshot } from '../tasks.js'
 import {
   createAgentWorktree,
   finishAgentWorktree,
@@ -94,32 +94,7 @@ export const agentTool: Tool = {
     if (typeof prepared === 'string') return prepared
 
     if (runInBackground) {
-      const task = await startAgentTask({
-        description: prepared.description,
-        run: async context => {
-          context.write(formatBackgroundAgentHeader(prepared, context.taskId))
-          const result = await runPreparedAgent(prepared, {
-            signal: context.signal,
-            onEvent: event => writeBackgroundAgentEvent(context.write, event),
-          })
-          await writeAgentTranscript(context.taskId, prepared.messages)
-          context.write('\n--- final report ---\n')
-          context.write(formatAgentResult(result))
-          context.write('\n')
-        },
-        continueRun: async context => {
-          prepared.messages.push({ role: 'user', content: context.prompt })
-          context.write(formatBackgroundAgentContinuationHeader(prepared, context.taskId, context.prompt))
-          const result = await runPreparedAgent(prepared, {
-            signal: context.signal,
-            onEvent: event => writeBackgroundAgentEvent(context.write, event),
-          })
-          await writeAgentTranscript(context.taskId, prepared.messages)
-          context.write('\n--- continued final report ---\n')
-          context.write(formatAgentResult(result))
-          context.write('\n')
-        },
-      })
+      const task = await startBackgroundAgentTask(prepared)
       return formatStartedAgentTask(task)
     }
 
@@ -150,6 +125,25 @@ interface AgentRunResult {
   worktreeSession: WorktreeSession | null
   worktreeResult: AgentWorktreeCleanupResult | null
   worktreeCleanupError: string | null
+}
+
+interface BackgroundAgentMetadata {
+  version: 1
+  taskId: string
+  agentType: string
+  description: string
+  maxTurns: number
+  isolation: AgentIsolation | null
+  runtimeContext: AgentRuntimeContext
+  worktreeSession: WorktreeSession | null
+  worktreeResult: AgentWorktreeCleanupResult | null
+  worktreeCleanupError: string | null
+  subAgentToolNames: string[]
+  updatedAt: string
+}
+
+interface RestoreBackgroundAgentOptions {
+  llmStream?: LLMStreamer
 }
 
 async function prepareAgentRun(
@@ -217,10 +211,223 @@ async function prepareAgentRun(
   }
 }
 
+async function startBackgroundAgentTask(prepared: PreparedAgentRun): Promise<TaskSnapshot> {
+  const handlers = createBackgroundAgentTaskHandlers(prepared)
+  return await startAgentTask({
+    description: prepared.description,
+    run: handlers.run,
+    continueRun: handlers.continueRun,
+  })
+}
+
+export async function restoreBackgroundAgentTask(
+  taskId: string,
+  options: RestoreBackgroundAgentOptions = {},
+): Promise<TaskSnapshot> {
+  const existing = getTask(taskId)
+  if (existing) return existing
+
+  const prepared = await loadPreparedAgentRun(taskId)
+  return await restoreAgentTask({
+    id: taskId,
+    description: prepared.description,
+    outputPath: agentOutputPath(taskId),
+    transcriptPath: agentTranscriptPath(taskId),
+    continueRun: createBackgroundAgentTaskHandlers(prepared, options).continueRun,
+  })
+}
+
+function createBackgroundAgentTaskHandlers(
+  prepared: PreparedAgentRun,
+  options: RestoreBackgroundAgentOptions = {},
+): {
+  run: (context: { taskId: string; signal: AbortSignal; write(chunk: string | Buffer): void }) => Promise<void>
+  continueRun: (context: AgentTaskContinuationContext) => Promise<void>
+} {
+  return {
+    run: async context => {
+      context.write(formatBackgroundAgentHeader(prepared, context.taskId))
+      const result = await runPreparedAgent(prepared, {
+        signal: context.signal,
+        llmStream: options.llmStream,
+        onEvent: event => writeBackgroundAgentEvent(context.write, event),
+      })
+      await writeAgentState(context.taskId, prepared, result)
+      context.write('\n--- final report ---\n')
+      context.write(formatAgentResult(result))
+      context.write('\n')
+    },
+    continueRun: async context => {
+      prepared.messages.push({ role: 'user', content: context.prompt })
+      context.write(formatBackgroundAgentContinuationHeader(prepared, context.taskId, context.prompt))
+      const result = await runPreparedAgent(prepared, {
+        signal: context.signal,
+        llmStream: options.llmStream,
+        onEvent: event => writeBackgroundAgentEvent(context.write, event),
+      })
+      await writeAgentState(context.taskId, prepared, result)
+      context.write('\n--- continued final report ---\n')
+      context.write(formatAgentResult(result))
+      context.write('\n')
+    },
+  }
+}
+
+async function loadPreparedAgentRun(taskId: string): Promise<PreparedAgentRun> {
+  const messages = await readAgentTranscript(agentTranscriptPath(taskId))
+  const metadata = await readAgentMetadata(taskId)
+  const agentType = metadata?.agentType ?? inferAgentType(messages)
+  const agent = getAgentDefinition(agentType)
+  if (!agent) throw new Error(`无法恢复后台 agent：未知 agent type ${agentType}`)
+
+  if (metadata?.worktreeResult?.status === 'removed') {
+    throw new Error(`无法恢复后台 agent ${taskId}：它的 worktree 已在上次运行结束时自动清理。`)
+  }
+
+  const isolation = metadata?.isolation ?? undefined
+  const { getAllTools } = await import('./index.js')
+  const subAgentTools = filterToolsForIsolation(resolveAgentTools(agent, getAllTools()), isolation)
+  const runtimeContext = metadata?.runtimeContext
+    ? createAgentRuntimeContext(metadata.runtimeContext)
+    : createAgentRuntimeContext()
+  const worktreeSession = metadata?.worktreeSession ?? runtimeContext.worktreeSession ?? null
+
+  if (worktreeSession && !(await isDirectory(worktreeSession.worktreePath))) {
+    throw new Error(`无法恢复后台 agent ${taskId}：worktree 不存在或不可读：${worktreeSession.worktreePath}`)
+  }
+
+  return {
+    agentType: agent.agentType,
+    description: metadata?.description ?? inferAgentDescription(messages, agent.agentType),
+    maxTurns: metadata?.maxTurns ?? agent.maxTurns,
+    subAgentTools,
+    messages,
+    runtimeContext,
+    isolation,
+    worktreeSession,
+  }
+}
+
+async function writeAgentState(
+  taskId: string,
+  prepared: PreparedAgentRun,
+  result: AgentRunResult,
+): Promise<void> {
+  await Promise.all([
+    writeAgentTranscript(taskId, prepared.messages),
+    writeAgentMetadata(taskId, prepared, result),
+  ])
+}
+
+async function writeAgentMetadata(
+  taskId: string,
+  prepared: PreparedAgentRun,
+  result: AgentRunResult,
+): Promise<void> {
+  const path = agentMetadataPath(taskId)
+  await mkdir(dirname(path), { recursive: true })
+  const metadata: BackgroundAgentMetadata = {
+    version: 1,
+    taskId,
+    agentType: prepared.agentType,
+    description: prepared.description,
+    maxTurns: prepared.maxTurns,
+    isolation: prepared.isolation ?? null,
+    runtimeContext: prepared.runtimeContext,
+    worktreeSession: prepared.worktreeSession,
+    worktreeResult: result.worktreeResult,
+    worktreeCleanupError: result.worktreeCleanupError,
+    subAgentToolNames: prepared.subAgentTools.map(tool => tool.name),
+    updatedAt: new Date().toISOString(),
+  }
+  await writeFile(path, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8')
+}
+
+async function readAgentMetadata(taskId: string): Promise<BackgroundAgentMetadata | null> {
+  try {
+    const raw = await readFile(agentMetadataPath(taskId), 'utf8')
+    const parsed = JSON.parse(raw) as Partial<BackgroundAgentMetadata>
+    if (parsed.version !== 1 || parsed.taskId !== taskId || !parsed.agentType) {
+      throw new Error(`metadata 格式无效：${agentMetadataPath(taskId)}`)
+    }
+    return parsed as BackgroundAgentMetadata
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw err
+  }
+}
+
+async function readAgentTranscript(path: string): Promise<Message[]> {
+  let raw: string
+  try {
+    raw = await readFile(path, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`无法恢复后台 agent：找不到 transcript ${path}`)
+    }
+    throw err
+  }
+
+  const messages = raw
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map((line, index) => parseTranscriptMessage(line, path, index + 1))
+  if (messages.length === 0) throw new Error(`无法恢复后台 agent：transcript 为空 ${path}`)
+  return messages
+}
+
+function parseTranscriptMessage(line: string, path: string, lineNumber: number): Message {
+  let value: unknown
+  try {
+    value = JSON.parse(line)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    throw new Error(`无法解析 agent transcript ${path}:${lineNumber}: ${reason}`)
+  }
+
+  if (!isMessage(value)) {
+    throw new Error(`agent transcript ${path}:${lineNumber} 不是有效 message`)
+  }
+  return value
+}
+
+function isMessage(value: unknown): value is Message {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<Message>
+  return (
+    candidate.role === 'system' ||
+    candidate.role === 'user' ||
+    candidate.role === 'assistant' ||
+    candidate.role === 'tool'
+  ) && (typeof candidate.content === 'string' || candidate.content === null)
+}
+
+function inferAgentType(messages: Message[]): string {
+  const system = messages.find(message => message.role === 'system')?.content ?? ''
+  const match = /sub-agent of type "([^"]+)"/.exec(system)
+  return match?.[1] ?? DEFAULT_AGENT_TYPE
+}
+
+function inferAgentDescription(messages: Message[], agentType: string): string {
+  const firstUser = messages.find(message => message.role === 'user')?.content ?? ''
+  const match = /^Task description:\s*(.+)$/m.exec(firstUser)
+  return match?.[1]?.trim() || `${agentType} restored sub-agent`
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 async function runPreparedAgent(
   prepared: PreparedAgentRun,
   options: {
     signal?: AbortSignal
+    llmStream?: LLMStreamer
     onEvent?: (event: AgentEvent) => void
   } = {},
 ): Promise<AgentRunResult> {
@@ -236,6 +443,7 @@ async function runPreparedAgent(
     for await (const event of runAgent(prepared.messages, {
       tools: prepared.subAgentTools,
       maxTurns: prepared.maxTurns,
+      llmStream: options.llmStream,
       signal: options.signal,
       context: prepared.runtimeContext,
     })) {
@@ -471,6 +679,14 @@ async function writeAgentTranscript(taskId: string, messages: Message[]): Promis
 
 function agentTranscriptPath(taskId: string): string {
   return join(TASK_OUTPUT_DIR, `${taskId}.messages.jsonl`)
+}
+
+function agentMetadataPath(taskId: string): string {
+  return join(TASK_OUTPUT_DIR, `${taskId}.agent.json`)
+}
+
+function agentOutputPath(taskId: string): string {
+  return join(TASK_OUTPUT_DIR, `${taskId}.log`)
 }
 
 function summarizeToolCalls(toolCalls: string[]): string {

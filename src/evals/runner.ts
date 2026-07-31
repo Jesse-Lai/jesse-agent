@@ -25,8 +25,9 @@ import { readFileTool } from '../tools/readFile.js'
 import { runCommandTool } from '../tools/runCommand.js'
 import { writeFileTool } from '../tools/writeFile.js'
 import { taskContinueTool } from '../tools/taskContinue.js'
+import { restoreBackgroundAgentTask } from '../tools/agent.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
-import { readTaskOutput, startAgentTask } from '../tasks.js'
+import { continueAgentTask, readTaskOutput, startAgentTask } from '../tasks.js'
 import { createAgentRuntimeContext } from '../runtimeContext.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
@@ -60,6 +61,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runPerAgentRuntimeContextEval,
     runBackgroundAgentWorktreeContextEval,
     runBackgroundAgentContinuationEval,
+    runBackgroundAgentCrossProcessResumeEval,
   ]
 
   const results: EvalResult[] = []
@@ -320,6 +322,63 @@ async function runBackgroundAgentContinuationEval(): Promise<EvalResult> {
     check(checks, 'continued task completed', continued.snapshot.status === 'completed', continued.snapshot.status)
     check(checks, 'continued output includes follow-up', continued.output.includes('continued answer: follow up question'), continued.output)
   })
+}
+
+async function runBackgroundAgentCrossProcessResumeEval(): Promise<EvalResult> {
+  const root = await mkdtemp(join(tmpdir(), 'jesse-eval-agent-cross-process-'))
+  const realRoot = await realpath(root)
+
+  return runCase('background-agent-cross-process-resume', async checks => {
+    await setProjectRoot(realRoot)
+    const taskId = `agent-20260101T000000Z-cross${Date.now().toString(36)}`
+    const outputDir = join('.jesse', 'task-output')
+    const transcriptPath = join(outputDir, `${taskId}.messages.jsonl`)
+    const metadataPath = join(outputDir, `${taskId}.agent.json`)
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-restored-agent',
+      projectRoot: realRoot,
+      cwd: realRoot,
+      originalProjectRoot: realRoot,
+    })
+    const messages: Message[] = [
+      { role: 'system', content: 'You are a Jesse-Agent sub-agent of type "general".' },
+      { role: 'user', content: 'Task description: restored eval agent\n\nInitial task.' },
+      { role: 'assistant', content: 'Initial answer before CLI restart.' },
+    ]
+
+    await mkdir(outputDir, { recursive: true })
+    await writeFile(transcriptPath, `${messages.map(message => JSON.stringify(message)).join('\n')}\n`, 'utf8')
+    await writeFile(metadataPath, `${JSON.stringify({
+      version: 1,
+      taskId,
+      agentType: 'general',
+      description: 'restored eval agent',
+      maxTurns: 2,
+      isolation: null,
+      runtimeContext: context,
+      worktreeSession: null,
+      worktreeResult: null,
+      worktreeCleanupError: null,
+      subAgentToolNames: [],
+      updatedAt: new Date().toISOString(),
+    }, null, 2)}\n`, 'utf8')
+
+    const steps: ScriptedStep[] = [
+      { type: 'text', text: 'Restored continuation answered. VERDICT: PASS' },
+    ]
+    const restored = await restoreBackgroundAgentTask(taskId, { llmStream: createScriptedLLM(steps) })
+    const continued = await continueAgentTask(taskId, 'follow up after restart')
+    const output = await readTaskOutput(taskId, { block: true, timeoutMs: 1_000 })
+    const transcript = await readFile(transcriptPath, 'utf8')
+
+    check(checks, 'task restored from disk without prior registry entry', restored.id === taskId && restored.status === 'completed', `${restored.id} ${restored.status}`)
+    check(checks, 'restored task reports continuation available', restored.continuationAvailable === true, String(restored.continuationAvailable))
+    check(checks, 'continuation restarted restored task', continued.status === 'running', continued.status)
+    check(checks, 'continued restored task completed', output.snapshot.status === 'completed', output.snapshot.status)
+    check(checks, 'continued output includes restored answer', output.output.includes('Restored continuation answered'), output.output)
+    check(checks, 'transcript persisted follow-up prompt', transcript.includes('follow up after restart'), transcript)
+    check(checks, 'scripted continuation was consumed', steps.length === 0, `${steps.length} unused step(s)`)
+  }, root)
 }
 
 async function runCase(

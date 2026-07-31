@@ -69,7 +69,7 @@ function toolsSection(): string {
 - run_command 的 cwd 参数表示命令执行目录，默认是项目根目录；需要在子目录运行命令时传 cwd，不要用 cd ... && ...。
 - 预计很快完成的 shell 命令用 run_command；可能运行较久的测试、构建或调查用 run_background_command，让主对话保持响应。
 - 后台任务启动后会返回 task_id；用 task_list 查看任务，用 task_output 读取输出或等待完成，用 task_stop 停止不需要的任务。
-- 如果后台 agent task 已完成但用户要追问同一个 worker，用 task_continue 追加 prompt，让它带着原来的 messages/context 继续跑。
+- 如果后台 agent task 已完成但用户要追问同一个 worker，用 task_continue 追加 prompt，让它带着原来的 messages/context 继续跑；如果 CLI 重启过，task_continue 会从 task transcript 和 metadata 恢复该 worker。
 - 不要在 run_background_command 的 command 末尾再加 &；后台化由工具负责。
 - 如果一次要调用多个相互独立的工具（彼此不依赖对方的结果），可以在一条回复里并行发起，提高效率；有先后依赖的调用则按顺序来。`
 }

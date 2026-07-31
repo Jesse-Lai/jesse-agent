@@ -4,14 +4,15 @@
 
 import type { Tool } from '../types.js'
 import { formatTaskDetails } from '../taskDisplay.js'
-import { continueAgentTask } from '../tasks.js'
+import { continueAgentTask, getTask } from '../tasks.js'
+import { restoreBackgroundAgentTask } from './agent.js'
 
 export const taskContinueTool: Tool = {
   name: 'task_continue',
 
   description:
     '继续一个已经完成的后台 agent task。参数 task_id 和 prompt 必填。' +
-    '当前版本支持当前进程内的后台 agent continuation；重启后的跨进程 resume 会作为后续扩展。',
+    '如果 CLI 已重启且该 task 不在内存中，会尝试从 .jesse/task-output/<task-id>.messages.jsonl 和 metadata 恢复。',
 
   parameters: {
     type: 'object',
@@ -29,6 +30,10 @@ export const taskContinueTool: Tool = {
     const prompt = String(args.prompt ?? '').trim()
     if (!taskId) return '错误：未提供 task_id 参数。'
     if (!prompt) return '错误：未提供 prompt 参数。'
+
+    if (!getTask(taskId)) {
+      await restoreBackgroundAgentTask(taskId)
+    }
 
     const task = await continueAgentTask(taskId, prompt)
     return [

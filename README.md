@@ -123,7 +123,7 @@ Sub-agents can also run in the background:
 Use the explore sub-agent with run_in_background=true to map the auth flow. Return the task id, then continue with the main task.
 ```
 
-Background sub-agents return a `task_id` immediately. Use `task_list`, `task_output`, and `task_stop` to inspect progress, read the final report, or cancel the run. Use `task_continue` to append a follow-up prompt to a completed background agent in the current process. Agent transcripts are written to `.jesse/task-output/<task-id>.messages.jsonl` as the foundation for future cross-process resume.
+Background sub-agents return a `task_id` immediately. Use `task_list`, `task_output`, and `task_stop` to inspect progress, read the final report, or cancel the run. Use `task_continue` to append a follow-up prompt to a completed background agent. If the CLI was restarted and the task is no longer in memory, `task_output` and `task_continue` restore agent tasks from `.jesse/task-output/<task-id>.messages.jsonl` plus `.jesse/task-output/<task-id>.agent.json` before reading or continuing.
 
 Each agent run carries an `AgentRuntimeContext` with its own `agentId`, `projectRoot`, `cwd`, original root, and optional worktree metadata. The loop passes that context through the tool executor into file, shell, search, background shell, and skill-loading tools. This keeps sub-agents from relying on process-global cwd and lets background worktree agents run without moving the parent session.
 
@@ -145,7 +145,7 @@ Long-running shell commands and background sub-agents can be started without blo
 - `task_output` reads output later, optionally blocking until completion.
 - `task_stop` stops a running background shell task or cancels a background sub-agent.
 
-Task output is written under `.jesse/task-output/`. The registry is shaped around `kind: shell | agent`; shell tasks capture process output, and agent tasks capture bounded progress events plus the final report.
+Task output is written under `.jesse/task-output/`. The registry is shaped around `kind: shell | agent`; shell tasks capture process output, and agent tasks capture bounded progress events plus the final report. Background agent tasks also persist their message transcript and runtime metadata so completed workers can be restored after a CLI restart.
 
 ## Worktree Isolation
 
@@ -155,7 +155,7 @@ The main session can move into an isolated git worktree when the user explicitly
 - `exit_worktree` returns to the original project root with `action="keep"` or `action="remove"`.
 - `action="remove"` refuses to discard changed files or isolated commits unless `discard_changes=true` is explicitly provided.
 
-Worktree state is written to the JSONL transcript, so `--resume` can restore the active worktree. Synchronous sub-agent worktree isolation is implemented; background sub-agent worktree isolation remains deferred until the project root is scoped per agent run.
+Worktree state is written to the JSONL transcript, so `--resume` can restore the active worktree. Sub-agent worktree isolation is implemented for both synchronous and background sub-agents on top of per-agent runtime context.
 
 ## Evaluation Harness
 

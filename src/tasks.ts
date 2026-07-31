@@ -50,7 +50,7 @@ interface ShellTask extends BaseTask {
 interface AgentTask extends BaseTask {
   kind: 'agent'
   abortController: AbortController
-  outputStream: WriteStream
+  outputStream: WriteStream | null
   continueRun?: (context: AgentTaskContinuationContext) => Promise<void>
   transcriptPath?: string
 }
@@ -104,6 +104,14 @@ export interface StartAgentTaskInput {
   run: (context: AgentTaskContext) => Promise<void>
   continueRun?: (context: AgentTaskContinuationContext) => Promise<void>
   transcriptPath?: string
+}
+
+export interface RestoreAgentTaskInput {
+  id: string
+  description?: string
+  outputPath: string
+  transcriptPath: string
+  continueRun: (context: AgentTaskContinuationContext) => Promise<void>
 }
 
 const tasks = new Map<string, BackgroundTask>()
@@ -207,6 +215,40 @@ export async function startAgentTask(input: StartAgentTaskInput): Promise<TaskSn
 
   appendTaskOutput(task, `[agent task started] ${task.description}\n\n`)
   void runAgentTask(task, input.run)
+
+  return snapshotTask(task)
+}
+
+export async function restoreAgentTask(input: RestoreAgentTaskInput): Promise<TaskSnapshot> {
+  const existing = tasks.get(input.id)
+  if (existing) return snapshotTask(existing)
+
+  await mkdir(TASK_OUTPUT_DIR, { recursive: true })
+  registerProcessCleanup()
+
+  const info = await stat(input.outputPath).catch(() => null)
+  const outputTextTail = await readTail(input.outputPath, MEMORY_OUTPUT_TAIL_CHARS)
+  const now = Date.now()
+  const startTime = timestampFromTaskId(input.id) ?? info?.birthtimeMs ?? info?.mtimeMs ?? now
+  const endTime = info?.mtimeMs ?? startTime
+  const task: AgentTask = {
+    id: input.id,
+    kind: 'agent',
+    description: normalizeDescription(input.description, 'restored background agent task'),
+    status: 'completed',
+    startTime,
+    endTime,
+    outputPath: input.outputPath,
+    outputBytes: info?.size ?? Buffer.byteLength(outputTextTail),
+    outputTextTail,
+    lastOutputAt: endTime,
+    lastActivity: lastMeaningfulLine(outputTextTail) ?? 'restored background agent',
+    abortController: new AbortController(),
+    outputStream: null,
+    continueRun: input.continueRun,
+    transcriptPath: input.transcriptPath,
+  }
+  tasks.set(input.id, task)
 
   return snapshotTask(task)
 }
@@ -344,7 +386,7 @@ function appendTaskOutput(task: OutputBackedTask, chunk: string | Buffer): void 
   task.outputTextTail = boundedTail(`${task.outputTextTail}${text}`, MEMORY_OUTPUT_TAIL_CHARS)
   task.lastOutputAt = Date.now()
   task.lastActivity = lastMeaningfulLine(text) ?? task.lastActivity
-  task.outputStream.write(text)
+  task.outputStream?.write(text)
 }
 
 function readTaskOutputTail(task: BackgroundTask, maxChars: number): string | null {
@@ -392,8 +434,20 @@ async function runAgentTask(
       appendTaskOutput(task, `\n[task error] ${task.error}\n`)
     }
   } finally {
-    task.outputStream.end()
+    task.outputStream?.end()
+    task.outputStream = null
   }
+}
+
+function timestampFromTaskId(taskId: string): number | null {
+  const match = /^(?:shell|agent)-(\d{8})T(\d{6})Z-/.exec(taskId)
+  if (!match) return null
+  const date = match[1]
+  const time = match[2]
+  if (!date || !time) return null
+  const iso = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}Z`
+  const value = Date.parse(iso)
+  return Number.isFinite(value) ? value : null
 }
 
 function lastMeaningfulLine(text: string): string | undefined {

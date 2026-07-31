@@ -4,7 +4,8 @@
 
 import type { Tool } from '../types.js'
 import { formatTaskDetails } from '../taskDisplay.js'
-import { readTaskOutput } from '../tasks.js'
+import { getTask, readTaskOutput } from '../tasks.js'
+import { restoreBackgroundAgentTask } from './agent.js'
 
 export const taskOutputTool: Tool = {
   name: 'task_output',
@@ -30,6 +31,10 @@ export const taskOutputTool: Tool = {
   async execute(args) {
     const taskId = String(args.task_id ?? '').trim()
     if (!taskId) return '错误：未提供 task_id 参数。'
+
+    if (!getTask(taskId) && taskId.startsWith('agent-')) {
+      await restoreBackgroundAgentTask(taskId)
+    }
 
     const result = await readTaskOutput(taskId, {
       block: args.block === true,
