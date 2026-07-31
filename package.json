@@ -9,9 +9,10 @@
 
   "//scripts": "dev runs TS directly via tsx (no build step, fast feedback while learning). build/start are for later when we ship compiled JS.",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx --env-file=.env src/index.ts",
+    "eval": "tsx --env-file=.env src/evals/runner.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node --env-file=.env dist/index.js",
     "typecheck": "tsc --noEmit"
   },
 

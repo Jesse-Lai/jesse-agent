@@ -1,6 +1,12 @@
 node_modules/
 dist/
 .env
+.jesse/mcp.json
+.jesse/plans/
+.jesse/sessions/
+.jesse/task-output/
+.jesse/tool-results/
+.jesse/worktrees/
 *.js
 *.js.map
 *.d.ts

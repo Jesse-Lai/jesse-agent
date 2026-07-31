@@ -2,40 +2,45 @@
 
 ## Project Background
 
-Jesse is building a personal AI agent from scratch to:
-1. **Learn** how agents work at a fundamental level (not just using SDKs)
-2. **Build** a daily-use tool that grows with him
-3. **Eventually** evolve into a multi-platform agent (iOS app, desktop, WeChat)
+Jesse is building a personal coding agent from scratch to:
+1. **Learn** how production coding agents work at a fundamental level (not just by using SDKs)
+2. **Build** a terminal-first software engineering agent that can understand, edit, test, and reason about codebases
+3. **Eventually** reach a personal, simplified Claude Code-class experience for daily coding work
 
-### Reverse-Engineering Approach
-This project doubles as a **clean-room reverse-engineering** study of Claude Code (leaked source studied for reference at `session-state/.../ref-claude-code`). We study its *architecture and design intent* and rebuild an original, equivalent core ourselves.
-- **What we rebuild:** the agent *core* — the agentic loop (`query.ts`), the tool contract (`Tool.ts`), and the tool-execution pipeline (`toolExecution.ts`). This is only ~a few thousand lines and IS the essence of Claude Code.
-- **What we deliberately skip (for now):** the ~500k lines of Ink/React TUI polish, IDE bridge, telemetry, OAuth, enterprise features. Those are productization, not "the agent".
-- **End state:** a "Claude Code-class" original agent — same core capabilities (autonomous loop, tools, permissions, memory, sub-agents) — that can later be wrapped in different products (Web, Mac) because the core is UI-agnostic.
+### Claude Code Simplified Target
+This project aims to build a **personal, simplified Claude Code-style coding agent**. We study Claude Code's architecture and rebuild the same class of engineering capabilities in our own TypeScript codebase, while deliberately keeping the product surface smaller.
+- **What we replicate first:** the agent *core* — the agentic loop (`query.ts`), the tool contract (`Tool.ts`), and the tool-execution pipeline (`toolExecution.ts`). This is the essence of Claude Code.
+- **What we replicate next:** the coding-agent surface — file read/write/edit, code search (`Glob`/`Grep`), shell execution, git/test workflows, permissions, transcript/resume, context compaction, project memory, Skills, MCP, and sub-agents.
+- **What we simplify or defer:** the ~500k lines of Ink/React TUI polish, enterprise OAuth, telemetry, remote/cloud sessions, team swarm, marketplace, voice, mobile handoff, and other productization layers.
+- **End state:** a personal coding agent that feels like a small Claude Code: terminal-first, codebase-aware, tool-using, permissioned, resumable, memory-backed, extensible, and able to delegate focused coding tasks to sub-agents.
+
+### Non-goals
+- Calendar, email, general office automation, and life-assistant features are **out of scope** for the main roadmap.
+- iOS, WeChat, and generic multi-platform assistant clients are **not** the target. Future UI work should serve coding workflows: terminal, web/desktop coding UI, IDE integration, or MCP/SDK surfaces.
 
 ### Design Decisions
 - **Self-built agentic loop** — no agent frameworks (OpenAI Agents SDK, LangChain, etc.)
 - **OpenAI-compatible LLM via a local gateway** at `http://localhost:4399/v1` — no API key, works in China, exposes GPT-4o + many other models. Endpoint/model are env-configurable so the real OpenAI/Anthropic API can be swapped in later.
 - **No client SDK** — talk to the gateway with Node's native `fetch` (zero runtime deps), to truly understand every line.
-- **TypeScript** — enables future full-stack (agent core + web/app clients)
+- **TypeScript** — keeps the agent core portable across terminal, server, web/desktop coding UI, and MCP/SDK surfaces
 - **ReAct pattern** — Thought → Action → Observation → loop until done
-- **Event-stream core (load-bearing)** — the loop is an `async function*` that *yields typed events* and never prints directly (mirrors Claude Code's `query.ts`). This gives streaming for free AND keeps the core decoupled from any UI, so it can drive CLI now and Web/Mac later without engine changes.
-- **3-stage tool pipeline (load-bearing)** — every tool call goes through `validate → permission → call` (mirrors `toolExecution.ts`). The shape is locked in from Phase 2; validation/permission fill in later.
+- **Event-stream core (load-bearing)** — the loop is an `async function*` that *yields typed events* and never prints directly, matching Claude Code's `query.ts` architecture. This gives streaming for free AND keeps the core decoupled from any UI, so it can drive CLI now and Web/Mac later without engine changes.
+- **3-stage tool pipeline (load-bearing)** — every tool call goes through `validate → permission → call`, matching `toolExecution.ts`. The shape is locked in from Phase 2; validation/permission fill in later.
 
 ---
 
 ## Architecture Overview
 
 ```
-User ←→ [Interface: CLI / Web / App]
+User ←→ [Interface: CLI / future coding UI / IDE]
               ↕
          [Agentic Loop]  ← ReAct: think → act → observe → repeat
           ↕         ↕
     [LLM Interface]  [Tool System]
           ↕              ↕
-    [OpenAI API]    [File/Shell/Search...]
+    [OpenAI API]    [File/Search/Edit/Shell/Git/Test...]
           ↕
-    [Memory & Persistence]
+    [Session / Memory / Compaction]
 ```
 
 ---
@@ -88,7 +93,7 @@ User ←→ [Interface: CLI / Web / App]
 
 ### Step 6: Tool Registry & Executor (3-stage pipeline)
 - [ ] `src/tools/index.ts` — register all tools, provide lookup by name
-- [ ] Write the executor as an explicit **3-stage pipeline**, mirroring Claude Code's `toolExecution.ts` (`validateInput → checkPermissions → call`):
+- [ ] Write the executor as an explicit **3-stage pipeline**, matching Claude Code's `toolExecution.ts` (`validateInput → checkPermissions → call`):
   1. **validate** — is the input well-formed? If not, return the reason to the model (don't execute). *(stub for now, fill in Phase 4)*
   2. **permission** — does this need user approval? *(stub for now, fill in Step 6.5)*
   3. **call** — actually run the tool
@@ -97,7 +102,7 @@ User ←→ [Interface: CLI / Web / App]
 
 ### Step 6.5: Human-in-the-Loop Confirmation 🔒 (harness patch)
 - [ ] Mark each tool as "safe" (read-only) or "dangerous" (side effects)
-- [ ] Before executing a *dangerous* tool (`runCommand`, file writes), print the exact action and ask the user to confirm (y/n)
+- [ ] Before executing a *dangerous* tool (`runCommand`, file writes), print the exact action and ask the user to confirm (y/a/n)
 - [ ] Safe tools (`readFile`, `listFiles`) run without prompting
 - [ ] Add an "auto-approve" flag to skip prompts when you fully trust the task
 - **Why:** GUARDRAIL. The agent can run arbitrary shell commands — without a confirmation gate it could delete files or do real damage. Human-in-the-loop keeps you in control. This is a safety necessity, not a nice-to-have.
@@ -110,7 +115,7 @@ User ←→ [Interface: CLI / Web / App]
 > Goal: Agent can autonomously decide to use tools
 
 ### Step 7: The Loop — as an async generator (event stream) 🔑
-> LOAD-BEARING DECISION: build the loop as an `async function*` that **yields events** from day one, mirroring Claude Code's `query.ts`. Do NOT build a string-returning loop and bolt streaming on later — that would require rewriting the core.
+> LOAD-BEARING DECISION: build the loop as an `async function*` that **yields events** from day one, matching Claude Code's `query.ts` architecture. Do NOT build a string-returning loop and bolt streaming on later — that would require rewriting the core.
 
 - [ ] Write `src/loop.ts` — the core loop as a generator that yields typed events instead of returning a string:
   ```typescript
@@ -163,14 +168,14 @@ User ←→ [Interface: CLI / Web / App]
   - which tool ran, with what arguments
   - the tool result (truncated)
 - [ ] Keep it a single switch so normal use stays clean
-- **Why:** The agentic loop is INVISIBLE by default. Logging makes the agent's decision-making observable — essential for understanding and debugging how it "thinks". This is the single highest-value learning aid in the whole project. (📖 Claude Code uses full OpenTelemetry; a simplified console.log is our equivalent.)
+- **Why:** The agentic loop is INVISIBLE by default. Logging makes the agent's decision-making observable — essential for understanding and debugging how it "thinks". This is the single highest-value learning aid in the whole project. Start with a minimal console-log version, then evolve toward Claude Code's full OpenTelemetry-style observability.
 
 ### ✅ Milestone: Ask "what files are in the current directory?" → agent calls list_files → reads result → replies with the answer
 
 ---
 
 ## Phase 4: Actually Usable (Week 2)
-> Goal: Stable enough for daily use
+> Goal: Stable enough for simple coding tasks
 
 ### Step 9: System Prompt
 - [ ] Write a good system prompt in `src/prompt.ts`
@@ -190,87 +195,149 @@ User ←→ [Interface: CLI / Web / App]
 - [ ] Show "thinking..." indicator while tools execute
 - **Why:** Way better UX — don't stare at a blank screen
 
-### ✅ Milestone: Can reliably complete simple daily tasks
+### ✅ Milestone: Can reliably complete simple coding tasks
 
 ---
 
-## Phase 5: Has Memory (Week 2-3)
-> Goal: Agent remembers across sessions
+## Phase 5: Sessions, Resume, and Context (Week 2-3)
+> Goal: Coding work survives restarts and long contexts
 
-### Step 12: Conversation Persistence
-- [ ] Save conversation history to file (JSON or SQLite)
-- [ ] Load previous conversation on startup
-- [ ] Session management (new session vs continue)
-- **Why:** Don't lose context on restart
+### Step 12: Append-only Session Transcript
+- [x] Store each session as append-only JSONL, one record per event/message/tool result
+- [x] Include enough metadata to resume: session id, cwd, model, turn index/tool event data, timestamp
+- [x] Add `--resume <session>` and `--continue` style startup paths
+- [x] Keep the runtime "sessionless": the JSONL log is the source of truth, process memory is only a cache
+- **Why:** Claude Code's recovery model is not a database; it is an append-only transcript that can rebuild state after a crash.
 
-### Step 13: Long-term Memory
-- [ ] Implement a memory file (like MEMORY.md)
-- [ ] Agent can read/write to it
-- [ ] Survives across sessions — important facts, preferences, decisions
-- **Why:** From "amnesia every restart" to "knows who you are"
+### Step 13: Tool Result Budget and Token Estimation
+- [x] Add a max result size per tool; truncate or persist oversized outputs outside the prompt
+- [x] For huge shell/test/search outputs, return a short preview plus a local file path to the full result
+- [x] Estimate context size using actual usage when available, otherwise character-based approximations
+- [x] Warn or compact before the context is too full *(warn now; compact comes in Step 14)*
+- **Why:** Coding agents produce huge logs. If every test output and grep result stays in context forever, the agent becomes expensive and eventually breaks.
 
-### Step 14: Context Window Management
-- [ ] Token counting
-- [ ] Strategy when history exceeds limit: prefer **structured summarization** over naive truncation. Mirror Claude Code's `compact/prompt.ts`: ask the model to write a summary with fixed sections (user's explicit requests, key technical concepts, files & code touched + why, current work, next step) and REPLACE old messages with that summary. A section-based summary keeps intent + code while dropping filler.
-- [ ] Trigger proactively with a buffer (compact BEFORE hitting the limit, e.g. at ~context_window − buffer), not after overflow. (📖 Claude Code's `autoCompact.ts`)
-- [ ] Optional: on compaction, also distill anything worth remembering long-term into MEMORY.md (📖 `sessionMemoryCompact`)
-- **Why:** Long conversations don't crash, and compaction preserves the important parts instead of blindly cutting.
+### Step 14: Structured Compaction
+- [x] Add manual `/compact`; warn near a threshold but do not compact automatically yet
+- [x] Insert a compact boundary record into the transcript
+- [x] Summarize older conversation into fixed sections: user intent, files touched, decisions, errors, current state, exact next step
+- [x] Keep recent messages and current task context after the summary
+- [x] Make the agent continue work directly after compaction, without reintroducing itself
+- **Why:** Long coding sessions need memory compression, not naive truncation. The summary is a compressed map of the work, not a chat recap.
 
-### ✅ Milestone: Restart agent → it still knows your name and past context
-
----
-
-## Phase 6: More Powerful (Week 3-4+)
-> Goal: Evolve toward a full personal agent system
-
-### Step 15: Multi-model Support
-- [ ] Abstract LLM interface → swap between OpenAI / Anthropic / others
-- [ ] Use cheap models for simple tasks, expensive ones for complex reasoning
-- **Why:** Flexibility and cost control
-
-### Step 16: More Tools
-- [ ] Web search
-- [ ] URL reader
-- [ ] Calendar integration
-- [ ] Email access
-- **Why:** More capable = more useful daily
-
-### Step 17: Server Mode + API
-- [ ] Add HTTP/WebSocket API layer on top of agent core
-- [ ] Other devices can connect and chat
-- **Why:** From "terminal only" to "use from anywhere"
-
-### Step 18: Clients
-- [ ] Web UI (React/Next.js)
-- [ ] iOS App (Swift/SwiftUI)
-- [ ] WeChat bot integration
-- **Why:** Multi-platform access like a real product
+### ✅ Milestone: Restart or compact mid-task → agent can continue the coding work
 
 ---
 
-## Phase 7: Advanced Harness (Future — add only when needed)
-> Goal: Complete the full agent-harness picture. Deliberately deferred to avoid over-engineering early. Add each piece when the project actually needs it.
+## Phase 6: Coding Tools and Safety (Week 3-4+)
+> Goal: Become useful on real codebases
 
-### Step 19: Planning (explicit task decomposition)
-- [ ] For complex tasks, have the agent first write an explicit plan (list of sub-steps), then execute against it and track progress
-- **Why:** The ReAct loop handles simple multi-step tasks implicitly; explicit planning helps keep complex tasks on track.
+### Step 15: Code Search Tools
+- [x] Add `glob` for fast file pattern matching
+- [x] Add `grep` backed by `rg` for content search
+- [x] Teach the prompt to prefer `glob`/`grep` over shell `find`/`grep` when possible
+- **Why:** A coding agent spends most of its time locating relevant files. Dedicated search tools are safer and more structured than arbitrary shell commands.
 
-### Step 20: Retrieval / RAG (over memory) — LLM-selects, no vector DB
-- [ ] **Simplest approach first (this is what Claude Code actually does):** keep each memory as a file with a name + short description. To retrieve, show the model the LIST of memory names+descriptions and ask it to pick the ≤5 relevant ones (one LLM call), then load only those. NO embeddings, NO vector database required. (📖 `memdir/findRelevantMemories.ts`)
-- [ ] Only if that proves insufficient at large scale: add embeddings via the gateway's `text-embedding-3-small` + similarity search.
-- **Why:** Once memory grows large it can't all fit in the context window — retrieve just what's relevant. Claude Code proves "let an LLM read the directory and choose" beats a vector store for simplicity and quality; skip the vector infrastructure until you actually need it.
+### Step 16: File Write and Edit Tools
+- [x] Add `write_file` for new files or full replacement
+- [x] Add `edit_file` for targeted string replacement or patch-style edits
+- [x] Enforce read-before-write: the agent should read a file before editing it
+- [x] Show a diff or concise preview before risky edits *(concise preview now; full diff later)*
+- **Why:** Reading code is not enough. A coding agent needs precise, reviewable file modification tools so it does not abuse shell redirection or `sed` for edits.
 
-### Step 21: Evaluation Harness
-- [ ] A set of test tasks with expected outcomes; run the agent against them and score pass/fail
-- [ ] Track regressions as you change prompts/tools
-- **Why:** An objective measure of whether a change makes the agent better or worse, instead of guessing.
+### Step 17: Bash Hardening and Permission Rules
+- [x] Replace simple y/N with a small `allow` / `deny` / `ask` rule system *(session allow rules; deny is hard-blocked, not exposed as a "remember no" prompt)*
+- [x] Add permission modes: `default`, `plan`, `acceptEdits`, and a clearly dangerous bypass mode for trusted local use only
+- [x] Classify shell commands conservatively: read-only commands may run more freely; write/destructive/network commands require approval
+- [x] Add deny-list protections for obvious destructive commands and sensitive paths
+- [x] Keep timeout, output cap, and working-directory constraints on every command
+- **Why:** Claude Code's Bash safety is large because shell is the sharpest tool. Our simplified version still needs layered safety, not just one confirmation prompt.
 
-### Step 22: Multi-Agent & Orchestration — reuse the loop, wrap as a tool
-- [ ] **Key realization: a sub-agent IS just another run of your `runAgent()` loop** (Step 7) with its own isolated `messages`, its own `systemPrompt`, a restricted `tools` subset, and its own `maxTurns`. Nothing new to invent. (📖 `tools/AgentTool/runAgent.ts`)
-- [ ] Expose it as an `AgentTool` that satisfies the normal Tool contract (Step 4). When the main model calls it, it spawns a fresh loop, runs to completion, and returns the sub-agent's final answer as the tool result — indistinguishable from any other tool call to the main loop.
-- [ ] An agent is defined by a small config object: `{ name, whenToUse, tools, systemPrompt, model }` (📖 `AgentDefinition`). Ship a couple built-ins (e.g. an explore/read-only agent, a general-purpose agent).
-- [ ] Start with the **dispatch-and-aggregate** pattern (main delegates sub-tasks, collects results). This also doubles as context management — the sub-agent's exploration noise never pollutes the main context. Defer peer-to-peer messaging (SendMessage/inbox) until much later.
-- **Why:** Complex problems benefit from division of labor across focused agents — and it's a natural extension of the Phase 3 loop + Phase 2 tool contract, not a new subsystem.
+### Step 18: Git, Test, and Verification Workflow
+- [x] Make common coding checks ergonomic through prompt guidance plus existing `run_command` / read-only Git classification
+- [x] Capture failing command output as budgeted tool results so the model can fix and retry without flooding context
+- [x] Add prompt rules: do not commit, amend, push, or skip hooks unless the user explicitly asks
+- [x] Prefer verification before declaring a coding task complete
+- **Why:** A coding agent earns trust by closing the loop: inspect, edit, run checks, interpret failures, and report exactly what changed.
+
+### ✅ Milestone: Agent can inspect a repo, edit files, run checks, and fix a simple bug
+
+---
+
+## Phase 7: Memory, Skills, and Extensibility
+> Goal: Add Claude Code-style project knowledge and reusable capabilities
+
+### Step 19: Project Memory — File-based, Not Vector DB
+- [x] Create a memory directory for the current project
+- [x] Keep `MEMORY.md` as a short index, not a dumping ground
+- [x] Store detailed memories in topic Markdown files with frontmatter: name, description, type
+- [x] On each turn, show the model the memory file list and let it choose up to 5 relevant files to load
+- [x] Start without embeddings; add vector search only if file-based recall stops scaling
+- **Why:** Claude Code's memory is file-first. It is simple, inspectable, editable, and works well for project conventions and user preferences.
+
+### Step 20: Skills — Progressive Disclosure
+- [x] Support `.jesse/skills/<skill-name>/SKILL.md` or compatible `.claude/skills/<skill-name>/SKILL.md`
+- [x] Inject only skill name + short description into normal context
+- [x] Load the full `SKILL.md` only when the model explicitly invokes that skill
+- [x] Let skills reference helper scripts or examples in their own directory, loaded only when needed
+- **Why:** Skills are reusable coding playbooks. Progressive disclosure keeps the normal prompt small while allowing specialized workflows when needed.
+
+### Step 21: MCP and External Tooling
+- [x] Add a minimal MCP client for local stdio servers first
+- [x] Namespace MCP tools so they cannot collide with built-in tools
+- [x] Defer remote OAuth, marketplace, rich resources, and full MCP UI until the local client works
+- [x] Treat MCP tools as part of the same `validate → permission → call` pipeline
+- **Why:** MCP is the right extension point for coding integrations without hardcoding every tool into the agent core.
+
+### Step 22: Sub-agents — Reuse the Loop
+- [x] Expose an `agent` tool that runs another `runAgent()` with isolated messages, system prompt, tool subset, and max turns
+- [x] Start with synchronous sub-agents only
+- [x] Ship built-ins: `explore` (read/search only), `review` (code review), `verify` (run checks and inspect results), and `general`
+- [x] Return the sub-agent's final report as a normal tool result to the main loop
+- **Why:** A sub-agent is not a new architecture. It is the same loop with a smaller job and an isolated context.
+
+### ✅ Milestone: Agent can use project memory, invoke skills, call MCP tools, and delegate focused coding sub-tasks
+
+---
+
+## Phase 8: Advanced Coding Harness (Future)
+> Goal: Add the product behaviors that make a coding agent feel robust
+
+### Step 23: Plan Mode
+- [x] Add a mode where the agent can inspect and plan but cannot edit until the user approves
+- [x] Add an explicit `exit_plan_mode` path that saves the plan, asks for approval, and turns an approved plan into execution
+- **Why:** For risky code changes, planning and editing should be separate phases.
+
+### Step 24: Background Tasks
+- [x] Create a task registry for long-running shell commands and future sub-agents
+- [x] Allow the agent to read task output later instead of blocking the whole loop
+- [x] Add a simple stale-output detector for commands waiting on interactive input
+- [x] Ship first slice: background shell tasks via `run_background_command`, `task_list`, `task_output`, and `task_stop`
+- **Why:** Real coding work includes long tests, builds, and background investigations.
+
+### Step 25: Worktree Isolation
+- [x] Add optional git worktree creation for risky or parallel coding tasks
+- [x] Keep worktree metadata in the session transcript so resume works
+- [x] Ship first slice: `enter_worktree` / `exit_worktree` for the main session, with dynamic project root switching
+- [x] Refuse destructive worktree removal when there are changed files or isolated commits unless explicitly confirmed
+- [ ] Add sub-agent `isolation: "worktree"` on top of the same worktree core
+- **Why:** Parallel edits should not corrupt the main working tree.
+
+### Step 26: Evaluation Harness
+- [x] Build a small suite of coding tasks with expected outcomes
+- [x] Run the agent against them after prompt/tool changes
+- [x] Track regressions in tool use, safety, edit quality, and verification behavior
+- [x] Ship first slice: `npm run eval` with a deterministic scripted LLM that drives the real loop/tool pipeline
+- **Why:** Agent quality is too easy to judge by vibes. A coding agent needs repeatable checks.
+
+### Step 27: Better Coding Interfaces
+- [x] Extract terminal rendering into a dedicated CLI renderer so `index.ts` stays a thin REPL/event consumer
+- [x] Add human-readable tool activity summaries instead of dumping raw JSON args
+- [x] Show simplified inline diffs for `edit_file` and `write_file` tool starts
+- [x] Show clearer command/task status and bounded tool-result previews
+- [ ] Add richer file links, task progress, `/diff`, and resume picker
+- [ ] Consider IDE integration after the CLI core is stable
+- [x] Keep the agent core UI-agnostic
+- **Why:** Interface polish matters, but it should wrap a stable engine rather than drive the architecture.
 
 ---
 
@@ -364,10 +431,11 @@ message: {
 ## Current Status
 
 - [x] Repo created
-- [ ] Phase 1: Can Talk
-- [ ] Phase 2: Can Use Tools
-- [ ] Phase 3: Agentic Loop
-- [ ] Phase 4: Actually Usable
-- [ ] Phase 5: Has Memory
-- [ ] Phase 6: More Powerful
-- [ ] Phase 7: Advanced Harness (Planning / RAG / Evaluation / Multi-Agent)
+- [x] Phase 1: Can Talk
+- [x] Phase 2: Can Use Tools
+- [x] Phase 3: Agentic Loop
+- [x] Phase 4: Actually Usable
+- [x] Phase 5: Sessions, Resume, and Context
+- [x] Phase 6: Coding Tools and Safety
+- [x] Phase 7: Memory, Skills, and Extensibility
+- [ ] Phase 8: Advanced Coding Harness

@@ -87,6 +87,8 @@ export type LLMStreamEvent =
 const BASE_URL = process.env.LLM_BASE_URL ?? 'http://localhost:4399/v1'
 const MODEL = process.env.LLM_MODEL ?? 'gpt-4o-2024-11-20'
 const API_KEY = process.env.LLM_API_KEY ?? '' // 本地网关不需要，留空即可
+const API_MODE = process.env.LLM_API_MODE ?? (BASE_URL.includes('/responses') ? 'responses' : 'chat_completions')
+const API_KEY_HEADER = process.env.LLM_API_KEY_HEADER ?? (BASE_URL.includes('cognitiveservices.azure.com') ? 'api-key' : 'Authorization')
 
 // ============================================================================
 // 三、核心函数：callLLM
@@ -98,6 +100,11 @@ export interface CallOptions {
   /** 可选的中断信号，用于取消请求（Ctrl+C 时会用到）。 */
   signal?: AbortSignal
 }
+
+export type LLMStreamer = (
+  messages: Message[],
+  options?: CallOptions,
+) => AsyncGenerator<LLMStreamEvent, void, void>
 
 /** 遇到限流(429)或服务端错误(5xx)时，最多重试几次。 */
 const MAX_RETRIES = 3
@@ -119,6 +126,11 @@ export async function* streamLLM(
   messages: Message[],
   options: CallOptions = {},
 ): AsyncGenerator<LLMStreamEvent, void, void> {
+  if (API_MODE === 'responses') {
+    yield* streamResponsesLLM(messages, options)
+    return
+  }
+
   // 组装请求体。stream:true = 让模型边生成边发（逐字），而不是全写完一次性给。
   // tools 只在传了的时候才加进去。
   const body: Record<string, unknown> = {
@@ -148,8 +160,7 @@ export async function* streamLLM(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          // 有 key 才加 Authorization 头；本地网关没有也无所谓。
-          ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
+          ...authHeaders(),
         },
         body: JSON.stringify(body),
         signal: requestSignal,
@@ -250,6 +261,207 @@ export async function* streamLLM(
   )
 }
 
+/**
+ * Azure/OpenAI Responses API 适配层。
+ * 对外仍然吐我们自己的 LLMStreamEvent，这样 loop.ts 不需要跟着改。
+ */
+async function* streamResponsesLLM(
+  messages: Message[],
+  options: CallOptions = {},
+): AsyncGenerator<LLMStreamEvent, void, void> {
+  const body: Record<string, unknown> = {
+    model: MODEL,
+    ...toResponsesInput(messages),
+    stream: true,
+  }
+  if (options.tools && options.tools.length > 0) {
+    body.tools = options.tools.map(toResponsesTool)
+  }
+
+  let lastError: unknown
+  let streamStarted = false
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      const requestSignal = options.signal
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : timeoutSignal
+
+      const response = await fetch(BASE_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
+        body: JSON.stringify(body),
+        signal: requestSignal,
+      })
+
+      if (response.status === 429 || response.status >= 500) {
+        lastError = new Error(`LLM 网关返回 ${response.status}`)
+        await sleep(backoffMs(attempt))
+        continue
+      }
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`LLM 请求失败 ${response.status}: ${text}`)
+      }
+
+      if (!response.body) throw new Error('LLM 响应没有 body')
+
+      const contentType = response.headers.get('content-type') ?? ''
+      if (!contentType.includes('text/event-stream')) {
+        const responseJson = await response.json() as ResponsesResponse
+        const finalResponse = toLLMResponseFromResponses(responseJson)
+        if (finalResponse.type === 'text' && finalResponse.text) {
+          yield { type: 'text_delta', text: finalResponse.text }
+        }
+        yield { type: 'done', response: finalResponse }
+        return
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let completed: ResponsesResponse | undefined
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        streamStarted = true
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith('data:')) continue
+          const payload = trimmed.slice(5).trim()
+          if (payload === '' || payload === '[DONE]') continue
+
+          let event: ResponsesStreamEvent
+          try {
+            event = JSON.parse(payload)
+          } catch {
+            continue
+          }
+
+          if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+            yield { type: 'text_delta', text: event.delta }
+          } else if (event.type === 'response.completed' && event.response) {
+            completed = event.response
+          } else if (event.type === 'error') {
+            throw new Error(event.message ?? 'Responses API 流式事件返回错误')
+          }
+        }
+      }
+
+      if (!completed) throw new Error('Responses API 流结束但没有 completed 事件')
+      yield { type: 'done', response: toLLMResponseFromResponses(completed) }
+      return
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') throw err
+      if (streamStarted) throw err
+      lastError = err
+      await sleep(backoffMs(attempt))
+    }
+  }
+
+  throw new Error(
+    `streamLLM 在 ${MAX_RETRIES + 1} 次尝试后仍失败：${String(lastError)}`,
+  )
+}
+
+function authHeaders(): Record<string, string> {
+  if (!API_KEY) return {}
+  if (API_KEY_HEADER.toLowerCase() === 'api-key') return { 'api-key': API_KEY }
+  return { [API_KEY_HEADER]: `Bearer ${API_KEY}` }
+}
+
+function toResponsesTool(tool: ToolDefinition): ResponsesToolDefinition {
+  return {
+    type: 'function',
+    name: tool.function.name,
+    description: tool.function.description,
+    parameters: tool.function.parameters,
+  }
+}
+
+function toResponsesInput(messages: Message[]): { instructions?: string; input: ResponsesInputItem[] } {
+  const input: ResponsesInputItem[] = []
+  let instructions: string | undefined
+
+  for (const message of messages) {
+    if (message.role === 'system' && !instructions) {
+      instructions = message.content ?? ''
+      continue
+    }
+
+    if (message.role === 'tool') {
+      input.push({
+        type: 'function_call_output',
+        call_id: message.tool_call_id ?? '',
+        output: message.content ?? '',
+      })
+      continue
+    }
+
+    if (message.role === 'assistant' && message.tool_calls) {
+      for (const toolCall of message.tool_calls) {
+        input.push({
+          type: 'function_call',
+          call_id: toolCall.id,
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments,
+        })
+      }
+      continue
+    }
+
+    input.push({ role: message.role, content: message.content ?? '' })
+  }
+
+  return instructions ? { instructions, input } : { input }
+}
+
+function toLLMResponseFromResponses(response: ResponsesResponse): LLMResponse {
+  const toolCalls: ToolCall[] = []
+  const textParts: string[] = []
+
+  for (const item of response.output ?? []) {
+    if (item.type === 'function_call') {
+      toolCalls.push({
+        id: item.call_id ?? item.id ?? '',
+        type: 'function',
+        function: {
+          name: item.name ?? '',
+          arguments: item.arguments ?? '{}',
+        },
+      })
+      continue
+    }
+
+    if (item.type === 'message') {
+      for (const content of item.content ?? []) {
+        if (content.type === 'output_text' && content.text) textParts.push(content.text)
+      }
+    }
+  }
+
+  if (toolCalls.length > 0) {
+    return {
+      type: 'tool_calls',
+      toolCalls,
+      raw: { role: 'assistant', content: textParts.join('') || null, tool_calls: toolCalls },
+    }
+  }
+
+  const text = response.output_text ?? textParts.join('')
+  return { type: 'text', text, raw: { role: 'assistant', content: text } }
+}
+
 // ============================================================================
 // 四、内部小工具
 // ============================================================================
@@ -280,6 +492,43 @@ interface ToolCallDelta {
   id?: string
   type?: 'function'
   function?: { name?: string; arguments?: string }
+}
+
+interface ResponsesToolDefinition {
+  type: 'function'
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+}
+
+type ResponsesInputItem =
+  | { role: Role; content: string }
+  | { type: 'function_call'; call_id: string; name: string; arguments: string }
+  | { type: 'function_call_output'; call_id: string; output: string }
+
+interface ResponsesResponse {
+  output_text?: string
+  output?: ResponsesOutputItem[]
+}
+
+type ResponsesOutputItem =
+  | {
+      type: 'message'
+      content?: Array<{ type?: string; text?: string }>
+    }
+  | {
+      type: 'function_call'
+      id?: string
+      call_id?: string
+      name?: string
+      arguments?: string
+    }
+
+interface ResponsesStreamEvent {
+  type?: string
+  delta?: string
+  response?: ResponsesResponse
+  message?: string
 }
 
 /**

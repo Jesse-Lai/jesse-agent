@@ -54,8 +54,9 @@ export interface JSONSchema {
 
 /** 单个参数的描述：类型 + 给模型看的说明。 */
 export interface JSONSchemaProperty {
-  type: 'string' | 'number' | 'boolean' | 'object' | 'array'
-  description: string
+  type?: string | string[]
+  description?: string
+  [key: string]: unknown
 }
 
 // ============================================================================

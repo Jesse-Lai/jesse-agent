@@ -13,13 +13,20 @@
  * 对应 Claude Code：src/query.ts 的 queryLoop（同样是 async function* + while）。
  */
 
-import { streamLLM, type Message, type LLMResponse } from './llm.js'
-import { allTools } from './tools/index.js'
+import { streamLLM, type Message, type LLMResponse, type LLMStreamer } from './llm.js'
+import { getAllTools } from './tools/index.js'
 import { executeTool } from './tools/executor.js'
-import { toOpenAITools } from './types.js'
+import { toOpenAITools, type Tool } from './types.js'
 
 // 最大轮次保护：防止模型无限调工具、永不收尾（死循环）。
 const MAX_TURNS = 10
+
+export interface RunAgentOptions {
+  tools?: Tool[]
+  maxTurns?: number
+  llmStream?: LLMStreamer
+  refreshSystemPrompt?: (messages: Message[]) => Promise<void>
+}
 
 /**
  * loop 向外吐出的"事件"。界面订阅这些事件来显示。
@@ -45,12 +52,16 @@ export type AgentEvent =
  */
 export async function* runAgent(
   messages: Message[],
+  options: RunAgentOptions = {},
 ): AsyncGenerator<AgentEvent, void, void> {
+  const availableTools = options.tools ?? getAllTools()
+  const maxTurns = options.maxTurns ?? MAX_TURNS
+  const llmStream = options.llmStream ?? streamLLM
   // 把我们的工具转成 OpenAI 格式，随每次请求发给模型，让它知道有哪些工具可用。
-  const tools = toOpenAITools(allTools)
+  const tools = toOpenAITools(availableTools)
 
   // 轮次计数：每问一次模型算一轮。
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
+  for (let turn = 0; turn < maxTurns; turn++) {
     // ---- 0. 宣告"新一轮开始"（只吐事件，绝不打印）----
     // 为什么需要它：一轮里可能调多个工具，光看 tool_start/tool_result 事件，
     // 消费方分不清"同一轮的下一个工具"和"下一轮的第一个工具"（中间那次重新
@@ -65,7 +76,7 @@ export async function* runAgent(
     // 捕获转成 error 事件优雅收尾（维持"loop 只通过事件对外沟通"的承重原则）。
     let response: LLMResponse | undefined
     try {
-      for await (const ev of streamLLM(messages, { tools })) {
+      for await (const ev of llmStream(messages, { tools })) {
         if (ev.type === 'text_delta') {
           yield { type: 'assistant_delta', text: ev.text }
         } else {
@@ -113,7 +124,7 @@ export async function* runAgent(
       yield { type: 'tool_start', name: toolCall.function.name, args }
 
       // 走 Phase 2 的三步管线执行（含 validate → 权限确认 → call）。
-      const result = await executeTool(toolCall.function.name, args)
+      const result = await executeTool(toolCall.function.name, args, { tools: availableTools })
 
       // 吐出"工具结果"事件。
       yield {
@@ -131,6 +142,8 @@ export async function* runAgent(
         tool_call_id: toolCall.id,
       })
     }
+
+    await options.refreshSystemPrompt?.(messages)
 
     // ---- 4. 回到 for 顶部，带着工具结果【再问一次模型】----
     // 模型这次能看到工具结果，据此决定：给最终答案，还是继续调工具。

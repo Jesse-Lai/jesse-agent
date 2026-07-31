@@ -1,598 +1,210 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code - Agentic Loop 流程图</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0d1117;
-            color: #e6edf3;
-            padding: 40px 20px;
-            min-height: 100vh;
-        }
-        h1 {
-            text-align: center;
-            font-size: 28px;
-            margin-bottom: 10px;
-            color: #58a6ff;
-        }
-        .subtitle {
-            text-align: center;
-            color: #8b949e;
-            margin-bottom: 40px;
-            font-size: 14px;
-        }
-        .flowchart {
-            max-width: 800px;
-            margin: 0 auto;
-            position: relative;
-        }
-        /* Nodes */
-        .node {
-            position: relative;
-            margin: 0 auto;
-            text-align: center;
-            padding: 16px 24px;
-            border-radius: 12px;
-            font-size: 14px;
-            font-weight: 500;
-            width: fit-content;
-            min-width: 200px;
-            max-width: 400px;
-        }
-        .node-start {
-            background: #1f6feb;
-            border: 2px solid #58a6ff;
-            border-radius: 30px;
-        }
-        .node-process {
-            background: #161b22;
-            border: 2px solid #30363d;
-        }
-        .node-decision {
-            background: #161b22;
-            border: 2px solid #f0883e;
-            transform: rotate(0deg);
-            border-radius: 8px;
-            padding: 12px 20px;
-        }
-        .node-decision::before {
-            content: '⟡';
-            position: absolute;
-            left: -8px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: #f0883e;
-            font-size: 16px;
-        }
-        .node-action {
-            background: #1c2d1c;
-            border: 2px solid #3fb950;
-        }
-        .node-end {
-            background: #2d1c2d;
-            border: 2px solid #bc8cff;
-            border-radius: 30px;
-        }
-        .node-error {
-            background: #2d1c1c;
-            border: 2px solid #f85149;
-        }
-        /* Arrows */
-        .arrow {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 40px;
-            position: relative;
-        }
-        .arrow::after {
-            content: '';
-            width: 2px;
-            height: 100%;
-            background: #30363d;
-            position: absolute;
-        }
-        .arrow-label {
-            background: #0d1117;
-            padding: 2px 8px;
-            font-size: 11px;
-            color: #8b949e;
-            z-index: 1;
-            border-radius: 4px;
-        }
-        .arrow-yes {
-            color: #3fb950;
-        }
-        .arrow-no {
-            color: #f85149;
-        }
-        /* Loop indicator */
-        .loop-container {
-            border: 2px dashed #f0883e;
-            border-radius: 16px;
-            padding: 30px 20px;
-            margin: 20px 0;
-            position: relative;
-        }
-        .loop-label {
-            position: absolute;
-            top: -12px;
-            left: 20px;
-            background: #0d1117;
-            padding: 0 10px;
-            color: #f0883e;
-            font-size: 13px;
-            font-weight: 600;
-        }
-        /* Step numbers */
-        .step-num {
-            position: absolute;
-            left: -35px;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 24px;
-            height: 24px;
-            background: #30363d;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 11px;
-            color: #8b949e;
-        }
-        /* Details */
-        .detail {
-            font-size: 11px;
-            color: #8b949e;
-            margin-top: 4px;
-        }
-        .file-ref {
-            font-size: 11px;
-            color: #58a6ff;
-            font-family: 'SF Mono', Monaco, monospace;
-            margin-top: 4px;
-        }
-        /* Branch layout */
-        .branch {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            margin: 10px 0;
-        }
-        .branch-item {
-            flex: 1;
-            max-width: 300px;
-        }
-        .branch-item .node {
-            width: 100%;
-        }
-        /* Side annotation */
-        .annotation {
-            position: absolute;
-            right: -220px;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 200px;
-            font-size: 11px;
-            color: #8b949e;
-            border-left: 2px solid #21262d;
-            padding-left: 12px;
-        }
-        /* Loop back arrow */
-        .loop-back {
-            position: absolute;
-            right: -15px;
-            top: 20%;
-            bottom: 20%;
-            width: 30px;
-            border: 2px solid #f0883e;
-            border-left: none;
-            border-radius: 0 12px 12px 0;
-        }
-        .loop-back::after {
-            content: '↑';
-            position: absolute;
-            top: -5px;
-            left: -7px;
-            color: #f0883e;
-            font-size: 16px;
-        }
-        /* Section dividers */
-        .section {
-            margin: 30px 0 15px;
-            padding: 8px 16px;
-            background: #161b22;
-            border-radius: 8px;
-            font-size: 12px;
-            color: #8b949e;
-            text-align: center;
-            border: 1px solid #21262d;
-        }
-        /* Legend */
-        .legend {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin-top: 40px;
-            padding: 20px;
-            border: 1px solid #21262d;
-            border-radius: 12px;
-        }
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-        }
-        .legend-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 3px;
-        }
-        /* Responsive */
-        @media (max-width: 600px) {
-            .annotation { display: none; }
-            .step-num { display: none; }
-            .branch { flex-direction: column; align-items: center; }
-        }
-
-        /* ============================================================
-           进度高亮层 —— 跟着 jesse-agent 的搭建进度走
-           每个节点标 data-status：done(已建) / building(在建) / todo(未建)
-           这样"搭到哪，图就亮到哪"，是一个可视化教学工具。
-           ============================================================ */
-
-        /* 未建：整体压暗，表示"还没搭到这里" */
-        .node[data-status="todo"] {
-            opacity: 0.35;
-            filter: grayscale(60%);
-        }
-        /* 已建：亮绿光晕 + 左上角 ✅ 徽标 */
-        .node[data-status="done"] {
-            box-shadow: 0 0 0 2px #3fb950, 0 0 16px rgba(63,185,80,0.45);
-        }
-        .node[data-status="done"]::after {
-            content: '✅';
-            position: absolute;
-            top: -12px;
-            right: -12px;
-            font-size: 16px;
-            background: #0d1117;
-            border-radius: 50%;
-            line-height: 1;
-        }
-        /* 在建：黄色呼吸灯 + 🔨 徽标 */
-        .node[data-status="building"] {
-            box-shadow: 0 0 0 2px #f0883e, 0 0 16px rgba(240,136,62,0.5);
-            animation: breathe 1.6s ease-in-out infinite;
-        }
-        .node[data-status="building"]::after {
-            content: '🔨';
-            position: absolute;
-            top: -12px;
-            right: -12px;
-            font-size: 16px;
-            background: #0d1117;
-            border-radius: 50%;
-            line-height: 1;
-        }
-        @keyframes breathe {
-            0%, 100% { box-shadow: 0 0 0 2px #f0883e, 0 0 8px rgba(240,136,62,0.35); }
-            50%      { box-shadow: 0 0 0 2px #f0883e, 0 0 22px rgba(240,136,62,0.75); }
-        }
-        /* 该节点对应哪个 Step 的小标签 */
-        .step-tag {
-            display: inline-block;
-            margin-top: 6px;
-            font-size: 10px;
-            font-family: 'SF Mono', Monaco, monospace;
-            color: #f0883e;
-            border: 1px solid #f0883e55;
-            border-radius: 10px;
-            padding: 1px 8px;
-        }
-
-        /* 顶部进度条 */
-        .progress-wrap {
-            max-width: 800px;
-            margin: 0 auto 30px;
-            padding: 16px 20px;
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 12px;
-        }
-        .progress-head {
-            display: flex;
-            justify-content: space-between;
-            font-size: 13px;
-            margin-bottom: 10px;
-        }
-        .progress-head .label { color: #e6edf3; font-weight: 600; }
-        .progress-head .count { color: #3fb950; font-family: 'SF Mono', Monaco, monospace; }
-        .progress-bar {
-            height: 8px;
-            background: #21262d;
-            border-radius: 6px;
-            overflow: hidden;
-        }
-        .progress-bar > span {
-            display: block;
-            height: 100%;
-            background: linear-gradient(90deg, #3fb950, #58a6ff);
-            border-radius: 6px;
-        }
-        .progress-note {
-            margin-top: 10px;
-            font-size: 11px;
-            color: #8b949e;
-            line-height: 1.6;
-        }
-        .progress-note b { color: #f0883e; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jesse-Agent：Claude Code 风格 Coding Agent 搭建全景</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0d1117; color:#e6edf3; padding:28px 18px 70px; }
+h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
+.subtitle { text-align:center; color:#8b949e; font-size:12px; margin-bottom:22px; }
+.progress-wrap { max-width:1200px; margin:0 auto 24px; padding:14px 18px; background:#161b22; border:1px solid #21262d; border-radius:12px; }
+.progress-head { display:flex; justify-content:space-between; font-size:13px; margin-bottom:9px; }
+.progress-head .label { color:#e6edf3; font-weight:600; }
+.progress-head .count { color:#3fb950; font-family:'SF Mono',Monaco,monospace; }
+.progress-bar { height:8px; background:#21262d; border-radius:6px; overflow:hidden; }
+.progress-bar > span { display:block; height:100%; background:linear-gradient(90deg,#3fb950,#58a6ff); border-radius:6px; }
+.progress-note { margin-top:9px; font-size:11px; color:#8b949e; line-height:1.6; }
+.progress-note b { color:#f0883e; }
+.compare { max-width:1200px; margin:0 auto; display:grid; grid-template-columns:1fr 1fr; gap:22px; align-items:start; }
+.column { border:1px solid #21262d; border-radius:14px; padding:18px 14px 26px; background:#0f141b; }
+.column.left { border-top:3px solid #58a6ff; }
+.column.right { border-top:3px solid #3fb950; }
+.col-head { text-align:center; font-size:16px; font-weight:700; }
+.col-head.left { color:#58a6ff; }
+.col-head.right { color:#3fb950; }
+.col-sub { text-align:center; font-size:11px; color:#8b949e; margin:4px 0 18px; }
+.node { position:relative; border:2px solid #30363d; border-radius:9px; padding:11px 13px; margin:0 auto; background:#161b22; font-size:13px; }
+.node .title { font-weight:600; margin-bottom:5px; }
+.node .desc { font-size:11px; color:#8b949e; line-height:1.5; }
+.node .file { font-size:11px; font-family:'SF Mono',Monaco,monospace; color:#58a6ff; margin-top:6px; display:inline-block; }
+.node-start { border-color:#58a6ff; border-radius:22px; background:#12233b; }
+.node-decision { border-color:#f0883e; }
+.node-end { border-color:#bc8cff; border-radius:22px; background:#221833; }
+.node-danger { border-color:#f85149; background:#21181a; }
+.arrow { height:26px; display:flex; align-items:center; justify-content:center; position:relative; }
+.arrow::after { content:'↓'; color:#6e7681; font-size:15px; }
+.arrow .lbl { position:absolute; font-size:10px; color:#8b949e; background:#0f141b; padding:0 6px; text-align:center; }
+.loop-hint { text-align:center; font-size:11px; color:#f0883e; border:1px dashed #f0883e88; border-radius:8px; padding:5px 8px; margin:8px 0; }
+.phase { border:1px solid #21262d; border-radius:12px; margin-bottom:14px; overflow:hidden; }
+.phase-head { padding:10px 14px; font-size:14px; font-weight:700; display:flex; justify-content:space-between; align-items:center; }
+.phase-body { padding:6px 14px 14px; }
+.phase.done .phase-head { background:#12241a; color:#3fb950; }
+.phase.todo .phase-head { background:#161b22; color:#8b949e; }
+.phase.current .phase-head { background:#2a2012; color:#f0883e; }
+.phase-status { font-size:10px; font-family:'SF Mono',Monaco,monospace; }
+.milestone { font-size:10px; color:#8b949e; font-weight:400; margin-top:2px; }
+.step { position:relative; border:1px solid #30363d; border-radius:8px; padding:9px 11px; margin:7px 0; background:#161b22; }
+.step .s-title { font-size:12px; font-weight:600; }
+.step .s-desc { font-size:10.5px; color:#8b949e; margin-top:3px; line-height:1.45; }
+.step .s-file { font-size:10.5px; font-family:'SF Mono',Monaco,monospace; color:#3fb950; margin-top:4px; display:inline-block; }
+.step[data-status="done"] { box-shadow:0 0 0 1px #3fb95066; }
+.step[data-status="done"]::after { content:'✅'; position:absolute; top:-8px; right:-8px; font-size:12px; background:#0d1117; border-radius:50%; }
+.step[data-status="todo"] { opacity:.45; }
+.step .tag { display:inline-block; margin-top:4px; font-size:9.5px; font-family:'SF Mono',Monaco,monospace; color:#f0883e; border:1px solid #f0883e55; border-radius:10px; padding:1px 7px; }
+.loop-box { border:1px dashed #f0883e88; border-radius:9px; padding:6px 11px 10px; margin:7px 0; }
+.loop-box .loop-label { font-size:10.5px; color:#f0883e; margin:3px 0 6px; font-weight:600; }
+.down { text-align:center; color:#6e7681; font-size:13px; margin:1px 0; }
+@media (max-width:820px){ .compare { grid-template-columns:1fr; } }
+</style>
 </head>
 <body>
-    <h1>🔄 Claude Code Agentic Loop</h1>
-    <p class="subtitle">基于 src/query.ts + src/services/tools/toolOrchestration.ts 的逆向分析</p>
+<h1>🛠️ Jesse-Agent 搭建全景</h1>
+<p class="subtitle">左：Claude Code 的生产级运行骨架　｜　右：我们按计划搭建的个人简化版 Coding Agent</p>
 
-    <!-- ===== 逆向搭建进度条（跟着 PLAN.md 的 Step 走）===== -->
-    <div class="progress-wrap">
-        <div class="progress-head">
-            <span class="label">🛠️ jesse-agent 逆向搭建进度</span>
-            <span class="count">Step 6.5 / 22 · Phase 2 ✅</span>
+<div class="progress-wrap">
+    <div class="progress-head">
+        <span class="label">🛠️ jesse-agent Coding Agent 总进度</span>
+        <span class="count">Phase 1-7 ✅ · Phase 8 / Step 27 当前 · 7 / 8 阶段</span>
+    </div>
+    <div class="progress-bar"><span style="width:88%;"></span></div>
+    <div class="progress-note">核心的 <b>agentic loop、工具管线、权限、会话、压缩、记忆、Skills、MCP、sub-agent、worktree 和 eval harness 已经跑通</b>。当前进入 <b>Phase 8 / Step 27：Coding Interfaces</b>，目标是改善终端编码体验，同时保持核心 UI-agnostic。右栏：✅ 已完成 · 🟠 当前阶段 · 灰色 = 待做。</div>
+</div>
+
+<div class="compare">
+
+<!-- 左栏：Claude Code 源码流程 -->
+<div class="column left">
+    <div class="col-head left">📖 Claude Code（源码运行流程）</div>
+    <div class="col-sub">Anthropic 官方 · ~50 万行 · 生产级</div>
+    <div class="node node-start"><div class="title">👤 用户输入消息</div><div class="desc">进入 REPL，组装成 messages[]</div><div class="file">screens/REPL.tsx</div></div>
+    <div class="arrow"><span class="lbl">messages[]</span></div>
+    <div class="node"><div class="title">📋 组装上下文</div><div class="desc">System Prompt + 历史 + Tool 定义 + 记忆</div><div class="file">queryContext.ts</div></div>
+    <div class="arrow"></div>
+    <div class="loop-hint">⟳ AGENTIC LOOP（while 循环）</div>
+    <div class="node"><div class="title">🧠 调用 LLM</div><div class="desc">发送 messages + tools，流式接收响应</div><div class="file">services/api/claude.ts</div></div>
+    <div class="arrow"><span class="lbl">response stream</span></div>
+    <div class="node"><div class="title">📡 解析响应</div><div class="desc">边收边解析：文本 / 工具调用 / 思考块</div><div class="file">StreamingToolExecutor.ts</div></div>
+    <div class="arrow"></div>
+    <div class="node node-decision"><div class="title">❓ 响应里有 tool_use 吗？</div><div class="desc">没有 → 纯文本，结束循环；有 → 往下执行</div><div class="file">query.ts</div></div>
+    <div class="arrow"><span class="lbl">有工具调用</span></div>
+    <div class="node"><div class="title">🔀 Tool 编排</div><div class="desc">只读的并行执行，写操作的串行执行</div><div class="file">toolOrchestration.ts</div></div>
+    <div class="arrow"></div>
+    <div class="node node-decision"><div class="title">🔒 权限检查</div><div class="desc">危险命令要不要拦？防命令注入（20 万字符安全代码）</div><div class="file">bashSecurity.ts</div></div>
+    <div class="arrow"></div>
+    <div class="node"><div class="title">⚙️ 执行工具</div><div class="desc">tool.execute(args) → result</div><div class="file">toolExecution.ts</div></div>
+    <div class="arrow"><span class="lbl">结果 append，回到循环顶部再问一次</span></div>
+    <div class="node node-danger"><div class="title">🗜️ 上下文压缩（超限时）</div><div class="desc">token 超限 → 结构化摘要替换旧对话</div><div class="file">compact/autoCompact.ts</div></div>
+    <div class="arrow"></div>
+    <div class="node node-end"><div class="title">✅ 返回最终文本 + 后处理</div><div class="desc">保存会话 / 提取记忆 / 统计 token</div><div class="file">sessionStorage.ts</div></div>
+</div>
+
+<!-- 右栏：jesse-agent 全景 -->
+<div class="column right">
+    <div class="col-head right">🛠️ jesse-agent（我们的全景搭建）</div>
+    <div class="col-sub">从零手写 · 零依赖 · 8 Phase / 27 Steps</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 1 · 能对话<div class="milestone">终端连续聊天，记得上文</div></div><span class="phase-status">✅</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 1 · 项目骨架</div><div class="s-desc">TS+Node，零依赖，配置外置 .env</div><div class="s-file">package.json · tsconfig</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 2 · 大脑（LLM 接口）</div><div class="s-desc">fetch 连网关，429 重试，返回 text/tool_calls</div><div class="s-file">src/llm.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 3 · 嘴和耳朵（CLI）</div><div class="s-desc">readline 读→打印→循环</div><div class="s-file">src/index.ts</div></div>
         </div>
-        <div class="progress-bar"><span style="width: 30%;"></span></div>
-        <div class="progress-note">
-            这张图既是 Claude Code 的运行原理，也是我们的<b>搭建蓝图</b>。每完成一个 Step 就点亮对应节点：
-            <b>✅ 已建</b> ·  <b>🔨 在建（呼吸灯）</b> · 暗灰 = 未建。搭到最后，整张图全亮 = agent 建成。
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 2 · 能用工具<div class="milestone">工具能调用，危险操作有护栏</div></div><span class="phase-status">✅</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 4 · 工具契约</div><div class="s-desc">统一模板 + isReadOnly</div><div class="s-file">src/types.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 5 · 三个工具</div><div class="s-desc">读文件/列目录/跑命令；错误当文本返回</div><div class="s-file">tools/*.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 6 · 注册表+三步管线 🔑</div><div class="s-desc">validate → permission → call</div><div class="s-file">tools/index.ts · executor.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 6.5 · 危险操作确认 🔒</div><div class="s-desc">只读放行；会改动的问 y/N</div><div class="s-file">src/confirm.ts</div></div>
+        </div>
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 3 · 自主决策 🔑 核心<div class="milestone">自己决定调工具、看结果、回答（已达成）</div></div><span class="phase-status">✅</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done">
+                <div class="s-title">Step 7 · 核心 loop 🔑（生成器/事件流）</div>
+                <div class="s-desc">async generator，只吐事件不打印</div>
+                <div class="s-file">src/loop.ts</div>
+                <div class="loop-box">
+                    <div class="loop-label">⟳ loop 每一轮内部（"自主"的关键）</div>
+                    <div style="font-size:10.5px; color:#8b949e; line-height:1.85;">
+                        ① 带工具清单问模型<br>
+                        ② 回文本 → 结束 ✅<br>
+                        ③ 要调工具 → 走三步管线（含 y/N 确认）<br>
+                        ④ 结果塞回 → <b style="color:#f0883e">回到 ① 再问一次</b>（精髓）<br>
+                        🛑 超最大轮次 → 强制结束
+                    </div>
+                </div>
+            </div>
+            <div class="step" data-status="done"><div class="s-title">Step 7b · CLI 消费事件流</div><div class="s-desc">for await 取事件按类型显示，证明核心与界面解耦</div><div class="s-file">src/index.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 8 · 对话历史/状态机</div><div class="s-desc">user/assistant/tool 按 OpenAI 格式累积</div><div class="s-file">src/loop.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 8.5 · 可观测性日志 🔍</div><div class="s-desc">--verbose 打印每轮决策，把黑盒变透明</div><div class="s-file">src/index.ts · loop.ts</div></div>
+        </div>
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 4 · 基本可用<div class="milestone">可靠完成简单编码任务</div></div><span class="phase-status">✅</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 9 · 系统提示</div><div class="s-desc">分段提示词（临摹 Claude Code 结构）+ 动态环境</div><div class="s-file">src/prompt.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 10 · 错误处理</div><div class="s-desc">请求超时 + error 事件优雅降级 + 工具兜底</div><div class="s-file">llm.ts · loop.ts · executor.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 11 · 流式逐字输出</div><div class="s-desc">回复逐字显示 + "思考中…" 指示器</div><div class="s-file">src/llm.ts · src/index.ts</div></div>
+        </div>
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 5 · 会话、恢复与上下文<div class="milestone">编码工作可以跨重启、跨长对话继续</div></div><span class="phase-status">✅</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 12 · Append-only JSONL 会话记录</div><div class="s-desc">每条消息、工具调用和结果都追加保存；支持 --resume / --continue</div><div class="s-file">src/session.ts · src/index.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 13 · 工具结果预算与 Token 估算</div><div class="s-desc">限制超大输出，保留预览和本地完整结果路径，防止上下文爆满</div><div class="s-file">src/contextBudget.ts · executor.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 14 · 结构化上下文压缩</div><div class="s-desc">手动 /compact，保留意图、改动、错误和下一步</div><div class="s-file">src/compaction.ts · src/index.ts</div></div>
+        </div>
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 6 · Coding Tools 与安全<div class="milestone">能检查代码、修改代码、运行验证</div></div><span class="phase-status">✅</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 15 · 代码搜索工具</div><div class="s-desc">glob 匹配文件，grep / rg 搜索代码内容</div><div class="s-file">src/tools/globFiles.ts · grepCode.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 16 · 文件写入与编辑工具</div><div class="s-desc">write_file、edit_file、读后写、预览风险编辑</div><div class="s-file">src/tools/writeFile.ts · editFile.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 17 · Bash 安全与权限规则</div><div class="s-desc">allow / ask、危险命令拦截、cwd 约束、权限模式</div><div class="s-file">permissions.ts · bashClassifier.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 18 · Git、测试与验证流程</div><div class="s-desc">按 Claude Code 风格约束 Git 操作，完成前优先验证</div><div class="s-file">src/prompt.ts</div></div>
+        </div>
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase done">
+        <div class="phase-head"><div>Phase 7 · Memory、Skills 与 Extensibility<div class="milestone">拥有项目知识和可复用扩展能力</div></div><span class="phase-status">完成</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 19 · 项目记忆</div><div class="s-desc">文件化 MEMORY.md + 主题 Markdown，注入 manifest，不先上向量数据库</div><div class="s-file">src/memory.ts · src/prompt.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 20 · Skills 渐进式加载</div><div class="s-desc">平时只注入技能 manifest，use_skill 调用时再读取完整 SKILL.md</div><div class="s-file">src/skills.ts · src/tools/useSkill.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 21 · MCP 外部工具</div><div class="s-desc">本地 stdio MCP，mcp__server__tool 命名，并复用统一权限管线</div><div class="s-file">src/mcp.ts · tools/index.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 22 · 同步 Sub-agents</div><div class="s-desc">explore、review、verify、general 复用同一个 runAgent loop</div><div class="s-file">src/agents.ts · src/tools/agent.ts</div></div>
+        </div>
+    </div>
+    <div class="down">↓</div>
+
+    <div class="phase current">
+        <div class="phase-head"><div>Phase 8 · Advanced Coding Harness<div class="milestone">让个人 Agent 更稳、更可控、更容易评估</div></div><span class="phase-status">当前</span></div>
+        <div class="phase-body">
+            <div class="step" data-status="done"><div class="s-title">Step 23 · Plan Mode</div><div class="s-desc">只读规划，exit_plan_mode 保存计划并请求批准，批准后进入执行</div><div class="s-file">src/planMode.ts · src/tools/exitPlanMode.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 24 · Background Tasks</div><div class="s-desc">统一 task registry，后台 shell 可启动、列表、读输出、停止；sub-agent 留好扩展口</div><div class="s-file">src/tasks.ts · src/tools/task*.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 25 · Worktree 隔离</div><div class="s-desc">enter/exit worktree，动态切换项目根目录，JSONL 记录可恢复</div><div class="s-file">src/worktrees.ts · src/tools/enterWorktree.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 26 · Evaluation Harness</div><div class="s-desc">npm run eval，用 scripted LLM 驱动真实 loop，检查校验、安全、编辑和验证行为</div><div class="s-file">src/evals/runner.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 27 · Coding Interfaces</div><div class="s-desc">抽出 CLI renderer，工具活动摘要、命令状态和 edit/write 简化 diff；resume picker 待扩展</div><div class="s-file">src/cliRenderer.ts · src/diff.ts</div><span class="tag">first slice</span></div>
         </div>
     </div>
 
-    <div class="flowchart">
-        <!-- Start -->
-        <div class="node node-start" data-status="done">
-            👤 用户输入消息
-            <div class="file-ref">QueryEngine.ts → processUserInput()</div>
-            <span class="step-tag">Step 3 · index.ts CLI 读输入（已建 ✅）</span>
-        </div>
-
-        <div class="arrow"><span class="arrow-label">messages[]</span></div>
-
-        <!-- Context Assembly -->
-        <div class="node node-process" data-status="todo" style="position: relative;">
-            <span class="step-num">1</span>
-            📋 组装上下文
-            <div class="detail">System Prompt + 对话历史 + Tool 定义 + 记忆</div>
-            <div class="file-ref">queryContext.ts → fetchSystemPromptParts()</div>
-            <span class="step-tag">Step 9 系统提示 / Step 13 记忆</span>
-        </div>
-
-        <div class="arrow"><span class="arrow-label">完整 context</span></div>
-
-        <!-- Loop Start -->
-        <div class="loop-container">
-            <span class="loop-label">⟳ AGENTIC LOOP（while 循环）</span>
-            <div class="loop-back"></div>
-
-            <!-- Call LLM -->
-            <div class="node node-process" data-status="done" style="position: relative;">
-                <span class="step-num">2</span>
-                🧠 调用 LLM（Anthropic API）
-                <div class="detail">发送 messages + tools → 流式接收响应</div>
-                <div class="file-ref">services/api/claude.ts</div>
-                <span class="step-tag">Step 2 · llm.ts（已建 ✅）</span>
-            </div>
-
-            <div class="arrow"><span class="arrow-label">response stream</span></div>
-
-            <!-- Streaming Tool Executor -->
-            <div class="node node-process" data-status="done" style="position: relative;">
-                <span class="step-num">3</span>
-                📡 StreamingToolExecutor 解析响应
-                <div class="detail">边接收边解析：text blocks / tool_use blocks / thinking blocks</div>
-                <div class="file-ref">StreamingToolExecutor.ts</div>
-                <span class="step-tag">Step 2 · 前瞻式返回 text/tool_calls（已建 ✅）</span>
-            </div>
-
-            <div class="arrow"></div>
-
-            <!-- Decision: has tool calls? -->
-            <div class="node node-decision" data-status="todo" style="position: relative;">
-                <span class="step-num">4</span>
-                响应包含 tool_use？
-                <span class="step-tag">Step 7 · loop 判断</span>
-            </div>
-
-            <div class="arrow"><span class="arrow-label arrow-no">❌ 否 — 纯文本回复</span></div>
-
-            <!-- End path -->
-            <div class="node node-end" data-status="done" style="margin-bottom: 30px;">
-                ✅ 结束循环，返回文本给用户
-                <div class="detail">stop_reason = "end_turn"</div>
-                <span class="step-tag">Step 3 · index.ts 打印回复（已建 ✅）</span>
-            </div>
-
-            <div class="section">↓ 如果有 tool_use ↓</div>
-
-            <!-- Tool Orchestration -->
-            <div class="node node-process" data-status="done" style="position: relative;">
-                <span class="step-num">5</span>
-                🔀 Tool 编排（partitionToolCalls）
-                <div class="detail">分组：read-only 的并行执行，write 的串行执行</div>
-                <div class="file-ref">toolOrchestration.ts → partitionToolCalls()</div>
-                <span class="step-tag">Step 4-6 · 工具契约+注册表+管线（已建 ✅）</span>
-            </div>
-
-            <div class="arrow"></div>
-
-            <!-- Permission Check -->
-            <div class="node node-decision" data-status="done" style="position: relative;">
-                <span class="step-num">6</span>
-                需要用户确认？（权限检查）
-                <div class="detail">bashPermissions / pathValidation</div>
-                <span class="step-tag">Step 6.5 · Human-in-the-Loop 🔒（已建 ✅）</span>
-            </div>
-
-            <div class="branch">
-                <div class="branch-item">
-                    <div class="node node-action">
-                        ✅ 允许 → 执行 Tool
-                        <div class="detail">tool.execute(args) → result</div>
-                        <div class="file-ref">toolExecution.ts → runToolUse()</div>
-                    </div>
-                </div>
-                <div class="branch-item">
-                    <div class="node node-error">
-                        ❌ 拒绝 → 返回错误
-                        <div class="detail">result = "用户拒绝了此操作"</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="arrow"><span class="arrow-label">tool_result</span></div>
-
-            <!-- Append to messages -->
-            <div class="node node-process" data-status="todo" style="position: relative;">
-                <span class="step-num">7</span>
-                📝 结果追加到 messages[]
-                <div class="detail">{ role: "tool", tool_use_id: "...", content: result }</div>
-                <span class="step-tag">Step 7-8 · loop 喂回结果</span>
-            </div>
-
-            <div class="arrow"></div>
-
-            <!-- Token check -->
-            <div class="node node-decision" data-status="todo" style="position: relative;">
-                <span class="step-num">8</span>
-                上下文超 token 限制？
-                <span class="step-tag">Step 14 · 上下文管理</span>
-            </div>
-
-            <div class="branch">
-                <div class="branch-item">
-                    <div class="node node-process">
-                        ⚠️ 是 → Auto Compact
-                        <div class="detail">压缩旧对话，保留最近内容</div>
-                        <div class="file-ref">compact/autoCompact.ts</div>
-                    </div>
-                </div>
-                <div class="branch-item">
-                    <div class="node node-action">
-                        ✅ 否 → 继续
-                    </div>
-                </div>
-            </div>
-
-            <div class="arrow"><span class="arrow-label arrow-yes">↩️ 回到步骤 2，继续循环</span></div>
-
-            <!-- Max iterations -->
-            <div class="node node-error" style="margin-top: 10px;">
-                🛑 安全阀：超过 max iterations → 强制结束
-                <div class="detail">MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3</div>
-            </div>
-        </div>
-
-        <!-- Post-loop -->
-        <div class="arrow"><span class="arrow-label">loop 结束后</span></div>
-
-        <div class="node node-process" data-status="todo">
-            💾 后处理
-            <div class="detail">保存对话历史 / 提取记忆 / 更新 session / token 统计</div>
-            <div class="file-ref">sessionStorage.ts / extractMemories.ts</div>
-            <span class="step-tag">Step 12-13 · 持久化 & 记忆</span>
-        </div>
-
-        <div class="arrow"></div>
-
-        <div class="node node-end">
-            👤 用户看到最终回复
-        </div>
-
-        <!-- Legend -->
-        <div class="legend">
-            <div class="legend-item">
-                <div class="legend-dot" style="background: #1f6feb;"></div>
-                入口/出口
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot" style="background: #30363d; border: 1px solid #8b949e;"></div>
-                处理步骤
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot" style="background: #f0883e;"></div>
-                判断/决策
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot" style="background: #3fb950;"></div>
-                执行动作
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot" style="background: #f85149;"></div>
-                错误/拒绝
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot" style="background: #bc8cff;"></div>
-                结束
-            </div>
-        </div>
-
-        <!-- Summary -->
-        <div style="margin-top: 40px; padding: 24px; background: #161b22; border-radius: 12px; border: 1px solid #21262d;">
-            <h3 style="color: #58a6ff; margin-bottom: 12px;">💡 核心理解</h3>
-            <ul style="list-style: none; line-height: 2;">
-                <li>1️⃣ <strong>Loop 只有两个出口：</strong>LLM 回复纯文本（正常结束）或达到 max iterations（强制结束）</li>
-                <li>2️⃣ <strong>Tool 执行是 loop 的唯一分支：</strong>有 tool_call → 执行 → 结果喂回 → 继续；没有 → 结束</li>
-                <li>3️⃣ <strong>并行优化：</strong>read-only 的 tool（如 FileRead、Glob）可以并行，write 的（如 Bash、FileEdit）必须串行</li>
-                <li>4️⃣ <strong>安全检查在执行前：</strong>不是所有 tool call 都会被执行，权限检查可以拦截</li>
-                <li>5️⃣ <strong>Auto-compact 是透明的：</strong>用户感知不到，但确保 loop 不会因为 token 溢出而崩溃</li>
-            </ul>
-        </div>
-
-        <!-- jesse-agent mapping -->
-        <div style="margin-top: 20px; padding: 24px; background: #1c2d1c; border-radius: 12px; border: 1px solid #3fb950;">
-            <h3 style="color: #3fb950; margin-bottom: 12px;">🛠️ 对应到 jesse-agent 的简化版</h3>
-            <pre style="color: #e6edf3; font-size: 13px; line-height: 1.6; overflow-x: auto;">
-// jesse-agent/src/loop.ts — 核心就这么多
-async function agentLoop(userMessage: string, messages: Message[]) {
-  messages.push({ role: "user", content: userMessage })
-
-  while (true) {
-    // Step 2: 调 LLM
-    const response = await callLLM(messages, tools)
-
-    // Step 4: 判断
-    if (response.type === "text") {
-      console.log(response.content)  // 结束
-      break
-    }
-
-    // Step 5-7: 执行 tool，结果喂回
-    for (const toolCall of response.toolCalls) {
-      const result = await executeTool(toolCall.name, toolCall.args)
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: result
-      })
-    }
-
-    // Step 8: 安全阀
-    if (messages.length > MAX_ITERATIONS) break
-  }
-}
-            </pre>
-            <p style="color: #8b949e; font-size: 12px; margin-top: 8px;">
-                Claude Code 的 2000+ 行 query.ts 做的事，核心逻辑就这 20 行。其余都是生产级优化。
-            </p>
-        </div>
-    </div>
+</div>
+</div>
 </body>
 </html>

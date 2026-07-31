@@ -19,6 +19,25 @@ import { stdin, stdout } from 'node:process'
 import type { Message } from './llm.js'
 import { runAgent } from './loop.js'
 import { buildSystemPrompt } from './prompt.js'
+import { loadProjectMemoryContext } from './memory.js'
+import { loadSkillsContext } from './skills.js'
+import { loadMcpRuntimeContext, type McpRuntimeContext } from './mcp.js'
+import { getPlanModeContext, initializePlanModeSession } from './planMode.js'
+import { setExternalTools } from './tools/index.js'
+import { openSession, SessionTranscript, type SessionEndReason } from './session.js'
+import { compactMessages } from './compaction.js'
+import { contextWarning, estimateContextChars } from './contextBudget.js'
+import { stopAllRunningTasks } from './tasks.js'
+import { getCurrentWorktreeSession, initializeWorktreeRuntime, restoreWorktreeSession } from './worktrees.js'
+import { createCliRenderer } from './cliRenderer.js'
+import {
+  getPermissionMode,
+  parsePermissionMode,
+  permissionModeDescription,
+  permissionModeHelp,
+  permissionModeTitle,
+  setPermissionMode,
+} from './permissionMode.js'
 
 // ============================================================================
 // 〇、可观测性开关（Step 8.5）：--verbose 或 DEBUG=1 打开"仪表盘"
@@ -37,61 +56,166 @@ import { buildSystemPrompt } from './prompt.js'
 const VERBOSE =
   process.argv.includes('--verbose') || process.env.DEBUG === '1'
 
-/** verbose 日志：只在开关打开时打印，用灰色 + [verbose] 前缀和正常输出区分。 */
-function vlog(line: string): void {
-  if (VERBOSE) console.log(`\x1b[90m  [verbose] ${line}\x1b[0m`)
+const RESUME_SESSION = argValue('--resume')
+const CONTINUE_SESSION = process.argv.includes('--continue')
+
+let activeSession: SessionTranscript | null = null
+let activeMcpRuntime: McpRuntimeContext | null = null
+let activeMessageCount = 0
+let sessionClosed = false
+let mcpClosed = false
+
+function argValue(name: string): string | undefined {
+  const index = process.argv.indexOf(name)
+  if (index === -1) return undefined
+  return process.argv[index + 1]
 }
 
-/**
- * "思考中…"指示器（Step 11 · (b)）：等模型出第一个字/第一个工具前转个圈，
- * 一有输出就抹掉。纯界面糖——只用 stdout，loop 毫不知情（维持解耦）。
- * 只在真实终端(TTY)里转；管道/重定向时不转，避免 \r 刷屏成乱码。
- */
-let thinkingTimer: ReturnType<typeof setInterval> | null = null
-function startThinking(): void {
-  if (!stdout.isTTY || thinkingTimer) return
-  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-  let i = 0
-  thinkingTimer = setInterval(() => {
-    stdout.write(`\r${frames[i++ % frames.length]} 思考中…`)
-  }, 80)
+async function refreshSystemPrompt(messages: Message[]): Promise<void> {
+  const first = messages[0]
+  if (first?.role === 'system') {
+    const [memory, skills] = await Promise.all([
+      loadProjectMemoryContext(),
+      loadSkillsContext(),
+    ])
+    first.content = buildSystemPrompt(
+      memory,
+      skills,
+      activeMcpRuntime?.prompt ?? null,
+      getPlanModeContext(),
+    )
+  }
 }
-function stopThinking(): void {
-  if (!thinkingTimer) return
-  clearInterval(thinkingTimer)
-  thinkingTimer = null
-  stdout.write('\r\x1b[K') // 回行首 + 清到行尾，抹掉"思考中…"
+
+async function handlePermissionModeCommand(input: string, messages: Message[]): Promise<void> {
+  const directMode = input === '/plan'
+    ? 'plan'
+    : input === '/default'
+      ? 'default'
+      : input === '/acceptEdits'
+        ? 'acceptEdits'
+        : null
+
+  const rawMode = directMode ?? input.slice('/mode'.length).trim()
+  if (!rawMode) {
+    console.log(`\n${permissionModeHelp()}\n`)
+    return
+  }
+
+  const parsed = parsePermissionMode(rawMode)
+  if (!parsed) {
+    console.log(`\n未知权限模式：${rawMode}\n${permissionModeHelp()}\n`)
+    return
+  }
+
+  const result = setPermissionMode(parsed)
+  if (!result.ok) {
+    console.log(`\n[mode] ${result.reason}\n`)
+    return
+  }
+
+  await refreshSystemPrompt(messages)
+  console.log(`\n[mode] 已切换到 ${permissionModeTitle(result.mode)}：${permissionModeDescription(result.mode)}\n`)
+  if (result.mode === 'plan') {
+    const planPath = getPlanModeContext().planFilePath
+    if (planPath) console.log(`[plan] 计划文件：${planPath}\n`)
+  }
+}
+
+async function recordNewMessages(
+  session: SessionTranscript,
+  messages: Message[],
+  fromIndex: number,
+): Promise<number> {
+  for (let i = fromIndex; i < messages.length; i++) {
+    const message = messages[i]
+    if (!message) continue
+    await session.appendMessage(i, message)
+  }
+  return messages.length
+}
+
+async function closeActiveSession(reason: SessionEndReason): Promise<void> {
+  if (!activeSession || sessionClosed) return
+  sessionClosed = true
+  await activeSession.appendEnd(reason, activeMessageCount)
+}
+
+async function closeMcpRuntime(): Promise<void> {
+  if (!activeMcpRuntime || mcpClosed) return
+  mcpClosed = true
+  await activeMcpRuntime.close()
+}
+
+async function shutdown(reason: SessionEndReason): Promise<void> {
+  await stopAllRunningTasks()
+  await closeActiveSession(reason)
+  await closeMcpRuntime()
 }
 
 // ============================================================================
-// 一、对话历史（存在内存里）
+// 一、会话历史（内存缓存 + JSONL 行车记录仪）
 // ============================================================================
 
-// Phase 1 的决定：历史就是一个内存数组，退出即忘。
-// "重启还记得" 是 Phase 5（持久化）的事，现在做属于跳步。
-//
-// 第一条 system 消息给模型设定身份和行为守则。Step 9 已把它抽到 prompt.ts，
-// 结构参照 Claude Code（分段 + 静态/动态），启动时组装一次。
-const messages: Message[] = [
-  {
-    role: 'system',
-    content: buildSystemPrompt(),
-  },
-]
+// Phase 5 的决定：运行时仍然用 messages[] 当高速缓存；真正的来源是
+// `.jesse/sessions/*.jsonl` 里的 append-only transcript。这样当前 loop 不用改，
+// 但重启后可以从日志重建 messages。
 
 // ============================================================================
 // 二、REPL 主循环
 // ============================================================================
 
 async function main(): Promise<void> {
+  const renderer = createCliRenderer({ verbose: VERBOSE })
+  activeMcpRuntime = await loadMcpRuntimeContext()
+  setExternalTools(activeMcpRuntime.tools)
+
+  const openedSession = await openSession({
+    resumeId: RESUME_SESSION,
+    continueLatest: CONTINUE_SESSION,
+    model: process.env.LLM_MODEL ?? 'gpt-4o-2024-11-20',
+    apiMode: process.env.LLM_API_MODE ?? (process.env.LLM_BASE_URL?.includes('/responses') ? 'responses' : 'chat_completions'),
+  })
+  const session = openedSession.transcript
+  activeSession = session
+  initializePlanModeSession(session.id, event => session.appendPlanModeEvent(event))
+  initializeWorktreeRuntime(session.id, event => session.appendWorktreeEvent(event))
+  if (openedSession.worktreeSession) {
+    try {
+      await restoreWorktreeSession(openedSession.worktreeSession)
+    } catch (err) {
+      console.log(`[worktree] 恢复失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const messages: Message[] =
+    openedSession.messages.length > 0
+      ? openedSession.messages
+      : [
+          {
+            role: 'system',
+            content: buildSystemPrompt(null, null, activeMcpRuntime.prompt, getPlanModeContext()),
+          },
+        ]
+  await refreshSystemPrompt(messages)
+  let persistedMessageCount = openedSession.resumed ? messages.length : 0
+  persistedMessageCount = await recordNewMessages(session, messages, persistedMessageCount)
+  activeMessageCount = persistedMessageCount
+
   // readline 负责从终端一行一行读输入。question() 会打印提示符并等你敲回车。
   const rl = createInterface({ input: stdin, output: stdout })
 
-  // 开场白 + 用法提示。
-  console.log('🤖 Jesse-Agent（Phase 3：能自主调工具）')
-  console.log('   输入你的问题开始聊天；输入 exit 或按 Ctrl+C 退出。')
-  if (VERBOSE) console.log('   🔍 verbose 已开启：会打印每一轮的内部决策。')
-  console.log()
+  // 开场白 + 用法提示。具体终端排版交给 renderer，index.ts 保持 REPL 壳职责。
+  const worktreeSession = getCurrentWorktreeSession()
+  renderer.renderStartup({
+    sessionId: session.id,
+    modeTitle: permissionModeTitle(getPermissionMode()),
+    mcpToolCount: activeMcpRuntime.prompt.toolCount,
+    mcpServerCount: activeMcpRuntime.prompt.serverCount,
+    mcpErrors: activeMcpRuntime.prompt.errors,
+    worktreePath: worktreeSession?.worktreePath,
+    resumedMessageCount: openedSession.resumed ? messages.length : undefined,
+  })
 
   // 这就是 REPL 的 Loop：一个不断读输入的循环。
   while (true) {
@@ -104,6 +228,7 @@ async function main(): Promise<void> {
     } catch {
       // readline 已关闭（EOF）——正常收尾。
       console.log('\n👋 输入结束，再见！')
+      await shutdown('eof')
       break
     }
 
@@ -113,81 +238,88 @@ async function main(): Promise<void> {
     // 输入这两个词就退出。
     if (input === 'exit' || input === 'quit') {
       console.log('👋 再见！')
+      await shutdown('exit')
       break
     }
 
+    if (
+      input === '/mode' ||
+      input.startsWith('/mode ') ||
+      input === '/plan' ||
+      input === '/default' ||
+      input === '/acceptEdits'
+    ) {
+      await handlePermissionModeCommand(input, messages)
+      continue
+    }
+
+    if (input === '/compact') {
+      console.log('\n[compact] 正在把旧上下文压缩成结构化工作纪要...')
+      try {
+        const result = await compactMessages(messages)
+        if (!result.compacted) {
+          console.log(`[compact] ${result.reason}\n`)
+          continue
+        }
+
+        await session.appendCompactBoundary({
+          beforeMessageCount: result.beforeMessageCount,
+          afterMessageCount: result.afterMessageCount,
+          compactedMessageCount: result.compactedMessageCount,
+          keptRecentMessages: result.keptRecentMessages,
+          summary: result.summary,
+          messages: result.messages,
+        })
+
+        messages.splice(0, messages.length, ...result.messages)
+        await refreshSystemPrompt(messages)
+        persistedMessageCount = messages.length
+        activeMessageCount = messages.length
+
+        console.log(
+          `[compact] 已压缩 ${result.compactedMessageCount} 条旧消息，保留最近 ${result.keptRecentMessages} 条原文。`,
+        )
+        console.log(
+          `[compact] messages: ${result.beforeMessageCount} → ${result.afterMessageCount}，当前上下文粗估约 ${estimateContextChars(messages).toLocaleString()} 字符。\n`,
+        )
+      } catch (err) {
+        console.log(`[compact] 压缩失败：${err instanceof Error ? err.message : String(err)}\n`)
+      }
+      continue
+    }
+
+    // 每轮用户输入前刷新动态 system prompt：权限模式、memory manifest、当前环境。
+    await refreshSystemPrompt(messages)
+
     // 把用户这句话追加进历史（模型要看到完整上下文才能接话）。
     messages.push({ role: 'user', content: input })
+    persistedMessageCount = await recordNewMessages(session, messages, persistedMessageCount)
+    activeMessageCount = persistedMessageCount
+
+    const warning = contextWarning(messages)
+    if (warning) console.log(`\n[上下文提示] ${warning}\n`)
 
     // ---- Eval：交给 agentic loop，消费它吐出的事件流 ----
     // 核心与界面解耦：loop 只产生事件，index.ts（界面）负责把每种事件显示成
     // 终端文字。将来换成 Web/Mac，只需换这段显示逻辑，loop 一行不动。
-    // streaming: 本轮是否已开始逐字打印助手文本（用来只打一次"助手 › "前缀）。
-    let streaming = false
     try {
-      for await (const event of runAgent(messages)) {
-        switch (event.type) {
-          case 'turn_start':
-            // 仅 verbose：画一条轮次分隔线，让你看清 loop 转了几圈。
-            vlog(`──────── 第 ${event.turn} 轮 ────────`)
-            startThinking() // 开始等这一轮模型的输出（首字前的空白由它填上）
-            break
-          case 'assistant_delta':
-            stopThinking() // 第一个字来了，停掉"思考中…"
-            // 流式逐字：第一段碎片先打"助手 › "前缀，之后每段直接写（不换行）。
-            if (!streaming) {
-              vlog('💬 模型决定：直接用文本回答（流式）')
-              // TTY 下指示器刚被清掉，复用那一行写前缀；非 TTY 无指示器，用换行分隔。
-              stdout.write(stdout.isTTY ? '助手 › ' : '\n助手 › ')
-              streaming = true
-            }
-            stdout.write(event.text)
-            break
-          case 'assistant_text':
-            stopThinking() // 兜底：空回复没有 delta 时也把指示器停掉
-            // 正文已通过 delta 逐字打过了，这里补两个换行收尾。
-            // 兜底：若一个 delta 都没来（如空回复），仍打印完整文本。
-            if (!streaming && event.text) {
-              stdout.write(stdout.isTTY ? `助手 › ${event.text}` : `\n助手 › ${event.text}`)
-            }
-            stdout.write('\n\n')
-            streaming = false
-            break
-          case 'tool_start':
-            stopThinking() // 要调工具了，停掉"思考中…"
-            if (streaming) { stdout.write('\n'); streaming = false } // 收尾可能存在的流式文本行
-            vlog(`🤔 模型决定：调用工具 ${event.name}，参数=${JSON.stringify(event.args)}`)
-            console.log(`  🔧 调用工具 ${event.name}(${JSON.stringify(event.args)})`)
-            break
-          case 'tool_result': {
-            const preview =
-              event.content.length > 200
-                ? event.content.slice(0, 200) + '…'
-                : event.content
-            console.log(`  ${event.ok ? '✓' : '✗'} ${preview}`)
-            vlog(
-              `📥 工具结果已回传给模型（${event.ok ? '成功' : '失败'}，共 ${event.content.length} 字），下一轮它会据此决策`,
-            )
-            break
-          }
-          case 'error':
-            stopThinking()
-            console.log(`\n[出错] ${event.reason}\n`)
-            break
-          case 'max_turns':
-            stopThinking()
-            console.log('\n[提示] 达到最大轮次，已强制结束本轮。\n')
-            break
-        }
+      for await (const event of runAgent(messages, { refreshSystemPrompt })) {
+        await session.appendEvent(event)
+        persistedMessageCount = await recordNewMessages(session, messages, persistedMessageCount)
+        activeMessageCount = persistedMessageCount
+        renderer.renderEvent(event)
       }
+      persistedMessageCount = await recordNewMessages(session, messages, persistedMessageCount)
+      activeMessageCount = persistedMessageCount
     } catch (err) {
       console.error(`\n[出错] ${String(err)}\n`)
     } finally {
-      stopThinking() // 兜底：无论正常结束还是异常，都别让指示器留着转
+      renderer.stopThinking() // 兜底：无论正常结束还是异常，都别让指示器留着转
     }
     // ---- Loop：回到 while 顶部，继续等下一句 ----
   }
 
+  await shutdown('exit')
   rl.close()
 }
 
@@ -199,11 +331,11 @@ async function main(): Promise<void> {
 // 而不是粗暴地中断。
 process.on('SIGINT', () => {
   console.log('\n👋 收到 Ctrl+C，再见！')
-  process.exit(0)
+  void shutdown('sigint').finally(() => process.exit(0))
 })
 
 // 启动。用 main() 包一层，出错时能统一兜底。
 main().catch(err => {
   console.error('致命错误：', err)
-  process.exit(1)
+  void shutdown('fatal').finally(() => process.exit(1))
 })

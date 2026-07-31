@@ -15,11 +15,53 @@ import type { Tool } from '../types.js'
 import { readFileTool } from './readFile.js'
 import { listFilesTool } from './listFiles.js'
 import { runCommandTool } from './runCommand.js'
+import { globFilesTool } from './globFiles.js'
+import { grepCodeTool } from './grepCode.js'
+import { writeFileTool } from './writeFile.js'
+import { editFileTool } from './editFile.js'
+import { useSkillTool } from './useSkill.js'
+import { agentTool } from './agent.js'
+import { exitPlanModeTool } from './exitPlanMode.js'
+import { runBackgroundCommandTool } from './runBackgroundCommand.js'
+import { taskListTool } from './taskList.js'
+import { taskOutputTool } from './taskOutput.js'
+import { taskStopTool } from './taskStop.js'
+import { enterWorktreeTool } from './enterWorktree.js'
+import { exitWorktreeTool } from './exitWorktree.js'
 
-/** 所有已注册的工具。加新工具 = 往这里加一个。 */
-export const allTools: Tool[] = [readFileTool, listFilesTool, runCommandTool]
+/** 内置工具。加新的内置工具 = 往这里加一个。 */
+const builtInTools: Tool[] = [
+  readFileTool,
+  listFilesTool,
+  globFilesTool,
+  grepCodeTool,
+  writeFileTool,
+  editFileTool,
+  useSkillTool,
+  agentTool,
+  exitPlanModeTool,
+  taskListTool,
+  taskOutputTool,
+  taskStopTool,
+  enterWorktreeTool,
+  exitWorktreeTool,
+  runBackgroundCommandTool,
+  runCommandTool,
+]
+
+let externalTools: Tool[] = []
+
+/** 注册 MCP 等运行时发现的外部工具。 */
+export function setExternalTools(tools: Tool[]): void {
+  externalTools = tools
+}
+
+/** 所有当前可用工具：内置工具 + 运行时外部工具。 */
+export function getAllTools(): Tool[] {
+  return [...builtInTools, ...externalTools]
+}
 
 /** 按名字查找工具。找不到返回 undefined。 */
 export function findTool(name: string): Tool | undefined {
-  return allTools.find(t => t.name === name)
+  return getAllTools().find(t => t.name === name)
 }

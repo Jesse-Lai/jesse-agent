@@ -7,6 +7,7 @@
 
 import { readFile as fsReadFile } from 'node:fs/promises'
 import type { Tool } from '../types.js'
+import { rememberReadFile } from './readState.js'
 
 export const readFileTool: Tool = {
   name: 'read_file',
@@ -33,6 +34,7 @@ export const readFileTool: Tool = {
     if (!path) return '错误：未提供 path 参数'
     try {
       const content = await fsReadFile(path, 'utf-8')
+      await rememberReadFile(path, content)
       // 返回文本结果。这段会被喂回给模型（Phase 3 的 loop）。
       return content
     } catch (err) {
