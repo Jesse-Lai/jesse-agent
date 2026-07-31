@@ -24,6 +24,7 @@ import { editFileTool } from '../tools/editFile.js'
 import { readFileTool } from '../tools/readFile.js'
 import { runCommandTool } from '../tools/runCommand.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
+import { readTaskOutput, startAgentTask } from '../tasks.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
 const execFileAsync = promisify(execFile)
@@ -52,6 +53,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runReadBeforeWriteEval,
     runReadEditVerifyEval,
     runAgentWorktreeIsolationEval,
+    runBackgroundAgentTaskEval,
   ]
 
   const results: EvalResult[] = []
@@ -177,6 +179,27 @@ async function runAgentWorktreeIsolationEval(): Promise<EvalResult> {
     check(checks, 'cleanup reported no changes', result.changedFiles === 0 && result.commits === 0, result.message)
     check(checks, 'worktree directory no longer exists', !existsAfterCleanup, session.worktreePath)
   }, root)
+}
+
+async function runBackgroundAgentTaskEval(): Promise<EvalResult> {
+  return runCase('background-agent-task-registry', async checks => {
+    const started = await startAgentTask({
+      description: 'eval background agent',
+      run: async context => {
+        context.write('agent progress: started\n')
+        await sleep(20)
+        context.write('agent final: done\n')
+      },
+    })
+
+    const result = await readTaskOutput(started.id, { block: true, timeoutMs: 1_000 })
+
+    check(checks, 'task started as agent kind', started.kind === 'agent', started.kind)
+    check(checks, 'task returned an agent id', started.id.startsWith('agent-'), started.id)
+    check(checks, 'task completed successfully', result.snapshot.status === 'completed', result.snapshot.status)
+    check(checks, 'task output includes progress', result.output.includes('agent progress: started'), result.output)
+    check(checks, 'task output includes final report text', result.output.includes('agent final: done'), result.output)
+  })
 }
 
 async function runCase(
@@ -367,6 +390,10 @@ function printResults(results: EvalResult[]): void {
 
 function indent(text: string, prefix: string): string {
   return text.split('\n').map(line => `${prefix}${line}`).join('\n')
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

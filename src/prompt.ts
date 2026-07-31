@@ -76,7 +76,10 @@ function toolsSection(): string {
 /** ⑥ Sub-agents：隔离上下文的专业 worker。对应 Claude Code 的 AgentTool。 */
 function subAgentsSection(): string {
   return `# Sub-agents
-- agent 工具会启动一个同步子 agent：它有独立 messages、独立 system prompt、受限制的工具池，完成后只把最终报告作为工具结果返回。
+- agent 工具会启动一个子 agent：它有独立 messages、独立 system prompt、受限制的工具池。
+- 默认同步运行：主 agent 等子 agent 完成后，收到最终报告作为工具结果。
+- 如果子任务可能很久、可以独立推进，设置 run_in_background=true：工具会立刻返回 task_id，之后用 task_list / task_output / task_stop 管理它。
+- 当前薄版限制：run_in_background=true 暂时不能和 isolation="worktree" 组合；需要 worktree 隔离时先同步运行。
 - 适合用 agent 的情况：开放式代码探索、独立 review、实现后的 verify、会产生大量中间工具结果但主线程只需要结论的子任务。
 - 不适合用 agent 的情况：读取一个明确文件、搜索一个明确字符串、执行一两个直接命令；这些直接用 read_file / grep_code / run_command 更快。
 - 给子 agent 的 prompt 必须完整。它看不到主对话里你没写进去的背景；要交代目标、已知上下文、范围、输出格式和不要做什么。

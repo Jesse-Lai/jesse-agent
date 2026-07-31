@@ -342,6 +342,16 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Keep the agent core UI-agnostic
 - **Why:** Interface polish matters, but it should wrap a stable engine rather than drive the architecture.
 
+### Step 28: Background Sub-agents
+- [x] Add `run_in_background=true` to the `agent` tool
+- [x] Register background sub-agents as `kind: agent` tasks in the existing task registry
+- [x] Return `task_id` immediately and use `task_list` / `task_output` / `task_stop` for progress, output, and cancellation
+- [x] Write bounded progress events and the final sub-agent report to `.jesse/task-output/`
+- [x] Keep synchronous `isolation: "worktree"` intact, but reject `run_in_background=true` + `isolation: "worktree"` until project root state is per-agent instead of process-global
+- [ ] Add Claude Code-style interactive continuation/resume for background sub-agents
+- [ ] Add background sub-agent worktree isolation after the cwd/project-root model is fully scoped per agent
+- **Why:** Claude Code-style coding work benefits from parallel investigations, but async agent lifecycle should build on the existing task surface instead of creating a second task system.
+
 ---
 
 ## File Structure (Target for Phase 1-3)

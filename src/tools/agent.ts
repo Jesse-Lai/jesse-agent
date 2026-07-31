@@ -1,13 +1,17 @@
 /**
- * agent.ts - synchronous sub-agent tool.
+ * agent.ts - focused sub-agent tool.
  *
  * This is the first useful slice of Claude Code's AgentTool: pick an agent
  * definition, filter its tools, run the same loop in an isolated message list,
- * and return the final report as a normal tool result.
+ * and return the final report as a normal tool result. The thin async slice can
+ * also register the same run as a background task.
  */
 
 import type { Message } from '../llm.js'
+import type { AgentEvent } from '../loop.js'
 import type { Tool } from '../types.js'
+import { formatTaskDetails } from '../taskDisplay.js'
+import { startAgentTask, type TaskSnapshot } from '../tasks.js'
 import { getProjectRoot, setProjectRoot } from '../workingDirectory.js'
 import {
   createAgentWorktree,
@@ -38,11 +42,12 @@ export const agentTool: Tool = {
   name: 'agent',
 
   description:
-    'Launch a synchronous focused sub-agent and return its final report. ' +
+    'Launch a focused sub-agent and return its final report. ' +
     'Use this for isolated exploration, review, verification, or bounded sub-tasks. ' +
     'Available subagent_type values: explore, review, verify, general. ' +
     'Each sub-agent has its own isolated context and restricted tool pool. ' +
-    'Set isolation="worktree" to run the sub-agent in an isolated git worktree.',
+    'Set run_in_background=true to return a task_id immediately. ' +
+    'Set isolation="worktree" to run a synchronous sub-agent in an isolated git worktree.',
 
   parameters: {
     type: 'object',
@@ -67,6 +72,10 @@ export const agentTool: Tool = {
         type: 'string',
         description: 'Optional isolation mode. Use "worktree" to run this synchronous sub-agent in an isolated git worktree.',
       },
+      run_in_background: {
+        type: 'boolean',
+        description: 'Optional. If true, start the sub-agent as a background task and return task_id immediately. Not yet supported with isolation="worktree".',
+      },
     },
     required: ['prompt'],
   },
@@ -74,91 +83,173 @@ export const agentTool: Tool = {
   isReadOnly: false,
 
   async execute(args) {
-    const prompt = String(args.prompt ?? '').trim()
-    if (!prompt) return '错误：未提供 prompt 参数。'
-
     const isolation = parseIsolation(args.isolation)
     if (isolation instanceof Error) return `错误：${isolation.message}`
-
-    const requestedType = typeof args.subagent_type === 'string'
-      ? args.subagent_type.trim()
-      : DEFAULT_AGENT_TYPE
-    const agent = getAgentDefinition(requestedType)
-    if (!agent) {
+    const runInBackground = args.run_in_background === true
+    if (runInBackground && isolation === 'worktree') {
       return [
-        `错误：未知 subagent_type "${requestedType}"。`,
-        `可用类型：${BUILT_IN_AGENTS.map(def => def.agentType).join(', ')}`,
+        '错误：run_in_background=true 暂时不能和 isolation="worktree" 同时使用。',
+        '原因：当前 worktree project root 还是进程级状态，后台运行可能影响主 agent 的文件工具。',
+        '请先去掉 run_in_background 同步运行，或去掉 isolation 使用普通后台 sub-agent。',
       ].join('\n')
     }
 
-    const { getAllTools } = await import('./index.js')
-    const { runAgent } = await import('../loop.js')
-    const subAgentTools = filterToolsForIsolation(resolveAgentTools(agent, getAllTools()), isolation)
-    const maxTurns = parseMaxTurns(args.max_turns, agent.maxTurns)
-    const parentProjectRoot = getProjectRoot()
-    const agentId = createAgentId(agent.agentType)
-    let worktreeSession: WorktreeSession | null = null
-    let worktreeResult: AgentWorktreeCleanupResult | null = null
-    let worktreeCleanupError: string | null = null
+    const prepared = await prepareAgentRun(args, isolation)
+    if (typeof prepared === 'string') return prepared
 
-    if (isolation === 'worktree') {
-      worktreeSession = await createAgentWorktree({ agentId })
+    if (runInBackground) {
+      const task = await startAgentTask({
+        description: prepared.description,
+        run: async context => {
+          context.write(formatBackgroundAgentHeader(prepared, context.taskId))
+          const result = await runPreparedAgent(prepared, {
+            signal: context.signal,
+            onEvent: event => writeBackgroundAgentEvent(context.write, event),
+          })
+          context.write('\n--- final report ---\n')
+          context.write(formatAgentResult(result))
+          context.write('\n')
+        },
+      })
+      return formatStartedAgentTask(task)
     }
 
-    const messages: Message[] = [
-      {
-        role: 'system',
-        content: buildSubAgentSystemPrompt(agent, subAgentTools.map(tool => tool.name)),
-      },
-      {
-        role: 'user',
-        content: buildTaskPrompt(args.description, prompt, worktreeSession, parentProjectRoot),
-      },
-    ]
+    const result = await runPreparedAgent(prepared)
+    return formatAgentResult(result)
+  },
+}
 
-    let finalText = ''
-    let terminalStatus: 'completed' | 'max_turns' | 'error' = 'completed'
-    const toolCalls: string[] = []
-    const errors: string[] = []
+interface PreparedAgentRun {
+  agentType: string
+  description: string
+  maxTurns: number
+  subAgentTools: Tool[]
+  messages: Message[]
+  isolation: AgentIsolation | undefined
+  worktreeSession: WorktreeSession | null
+}
 
-    try {
-      await withProjectRoot(worktreeSession?.worktreePath ?? null, async () => {
-        for await (const event of runAgent(messages, { tools: subAgentTools, maxTurns })) {
-          if (event.type === 'tool_start') {
-            toolCalls.push(event.name)
-          } else if (event.type === 'assistant_text') {
-            finalText = event.text
-          } else if (event.type === 'error') {
-            terminalStatus = 'error'
-            errors.push(event.reason)
-          } else if (event.type === 'max_turns') {
-            terminalStatus = 'max_turns'
-          }
-        }
-      })
-    } finally {
-      if (worktreeSession) {
-        try {
-          worktreeResult = await finishAgentWorktree(worktreeSession)
-        } catch (err) {
-          worktreeCleanupError = err instanceof Error ? err.message : String(err)
+interface AgentRunResult {
+  agentType: string
+  status: 'completed' | 'max_turns' | 'error'
+  maxTurns: number
+  toolCalls: string[]
+  errors: string[]
+  finalText: string
+  isolation: AgentIsolation | undefined
+  worktreeSession: WorktreeSession | null
+  worktreeResult: AgentWorktreeCleanupResult | null
+  worktreeCleanupError: string | null
+}
+
+async function prepareAgentRun(
+  args: Record<string, unknown>,
+  isolation: AgentIsolation | undefined,
+): Promise<PreparedAgentRun | string> {
+  const prompt = String(args.prompt ?? '').trim()
+  if (!prompt) return '错误：未提供 prompt 参数。'
+
+  const requestedType = typeof args.subagent_type === 'string'
+    ? args.subagent_type.trim()
+    : DEFAULT_AGENT_TYPE
+  const agent = getAgentDefinition(requestedType)
+  if (!agent) {
+    return [
+      `错误：未知 subagent_type "${requestedType}"。`,
+      `可用类型：${BUILT_IN_AGENTS.map(def => def.agentType).join(', ')}`,
+    ].join('\n')
+  }
+
+  const { getAllTools } = await import('./index.js')
+  const subAgentTools = filterToolsForIsolation(resolveAgentTools(agent, getAllTools()), isolation)
+  const maxTurns = parseMaxTurns(args.max_turns, agent.maxTurns)
+  const parentProjectRoot = getProjectRoot()
+  const agentId = createAgentId(agent.agentType)
+  let worktreeSession: WorktreeSession | null = null
+
+  if (isolation === 'worktree') {
+    worktreeSession = await createAgentWorktree({ agentId })
+  }
+
+  const messages: Message[] = [
+    {
+      role: 'system',
+      content: buildSubAgentSystemPrompt(agent, subAgentTools.map(tool => tool.name)),
+    },
+    {
+      role: 'user',
+      content: buildTaskPrompt(args.description, prompt, worktreeSession, parentProjectRoot),
+    },
+  ]
+
+  return {
+    agentType: agent.agentType,
+    description: normalizeAgentDescription(args.description, agent.agentType),
+    maxTurns,
+    subAgentTools,
+    messages,
+    isolation,
+    worktreeSession,
+  }
+}
+
+async function runPreparedAgent(
+  prepared: PreparedAgentRun,
+  options: {
+    signal?: AbortSignal
+    onEvent?: (event: AgentEvent) => void
+  } = {},
+): Promise<AgentRunResult> {
+  const { runAgent } = await import('../loop.js')
+  let worktreeResult: AgentWorktreeCleanupResult | null = null
+  let worktreeCleanupError: string | null = null
+  let finalText = ''
+  let terminalStatus: 'completed' | 'max_turns' | 'error' = 'completed'
+  const toolCalls: string[] = []
+  const errors: string[] = []
+
+  try {
+    await withProjectRoot(prepared.worktreeSession?.worktreePath ?? null, async () => {
+      for await (const event of runAgent(prepared.messages, {
+        tools: prepared.subAgentTools,
+        maxTurns: prepared.maxTurns,
+        signal: options.signal,
+      })) {
+        options.onEvent?.(event)
+        if (event.type === 'tool_start') {
+          toolCalls.push(event.name)
+        } else if (event.type === 'assistant_text') {
+          finalText = event.text
+        } else if (event.type === 'error') {
+          terminalStatus = 'error'
+          errors.push(event.reason)
+        } else if (event.type === 'max_turns') {
+          terminalStatus = 'max_turns'
         }
       }
-    }
-
-    return formatAgentResult({
-      agentType: agent.agentType,
-      status: terminalStatus,
-      maxTurns,
-      toolCalls,
-      errors,
-      finalText,
-      isolation,
-      worktreeSession,
-      worktreeResult,
-      worktreeCleanupError,
     })
-  },
+  } finally {
+    if (prepared.worktreeSession) {
+      try {
+        worktreeResult = await finishAgentWorktree(prepared.worktreeSession)
+      } catch (err) {
+        worktreeCleanupError = err instanceof Error ? err.message : String(err)
+      }
+    }
+  }
+
+  return {
+    agentType: prepared.agentType,
+    status: terminalStatus,
+    maxTurns: prepared.maxTurns,
+    toolCalls,
+    errors,
+    finalText,
+    isolation: prepared.isolation,
+    worktreeSession: prepared.worktreeSession,
+    worktreeResult,
+    worktreeCleanupError,
+  }
 }
 
 function parseIsolation(value: unknown): AgentIsolation | undefined | Error {
@@ -285,6 +376,64 @@ function createAgentId(agentType: string): string {
     .replace(/\.\d{3}Z$/, 'Z')
   const suffix = Math.random().toString(36).slice(2, 8)
   return `agent-${agentType}-${stamp}-${suffix}`
+}
+
+function normalizeAgentDescription(description: unknown, agentType: string): string {
+  if (typeof description === 'string' && description.trim()) return description.trim()
+  return `${agentType} sub-agent`
+}
+
+function formatStartedAgentTask(task: TaskSnapshot): string {
+  return [
+    'Background sub-agent started.',
+    formatTaskDetails(task),
+    '',
+    'Use task_output with this task_id to read progress and the final report later. Use task_stop to cancel it if needed.',
+  ].join('\n')
+}
+
+function formatBackgroundAgentHeader(prepared: PreparedAgentRun, taskId: string): string {
+  return [
+    `task_id: ${taskId}`,
+    `sub_agent: ${prepared.agentType}`,
+    `description: ${prepared.description}`,
+    `max_turns: ${prepared.maxTurns}`,
+    `tools: ${prepared.subAgentTools.map(tool => tool.name).join(', ')}`,
+    '',
+    '--- progress ---',
+  ].join('\n') + '\n'
+}
+
+function writeBackgroundAgentEvent(write: (chunk: string | Buffer) => void, event: AgentEvent): void {
+  if (event.type === 'turn_start') {
+    write(`[turn ${event.turn}]\n`)
+  } else if (event.type === 'tool_start') {
+    write(`[tool_start] ${event.name}: ${previewJson(event.args, 700)}\n`)
+  } else if (event.type === 'tool_result') {
+    write(`[tool_result] ${event.name}: ${event.ok ? 'ok' : 'error'} (${event.content.length} chars)\n`)
+    const preview = previewText(event.content, 1_200)
+    if (preview) write(`${preview}\n`)
+  } else if (event.type === 'assistant_text') {
+    write(`[assistant_text] ${event.text.length} chars\n`)
+  } else if (event.type === 'error') {
+    write(`[error] ${event.reason}\n`)
+  } else if (event.type === 'max_turns') {
+    write('[max_turns]\n')
+  }
+}
+
+function previewJson(value: unknown, maxChars: number): string {
+  try {
+    return previewText(JSON.stringify(value), maxChars)
+  } catch {
+    return previewText(String(value), maxChars)
+  }
+}
+
+function previewText(text: string, maxChars: number): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= maxChars) return trimmed
+  return `${trimmed.slice(0, maxChars)}...`
 }
 
 function summarizeToolCalls(toolCalls: string[]): string {

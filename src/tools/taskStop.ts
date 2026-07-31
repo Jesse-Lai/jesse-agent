@@ -11,7 +11,7 @@ export const taskStopTool: Tool = {
 
   description:
     '停止一个正在运行的后台任务。参数 task_id 必填。' +
-    '当前第一版支持停止 shell 后台任务；未来会接入后台 sub-agent。',
+    '支持停止 shell 后台任务，也支持取消后台 sub-agent。',
 
   parameters: {
     type: 'object',

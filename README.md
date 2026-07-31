@@ -102,7 +102,7 @@ On startup, the agent connects to local stdio servers, calls `tools/list`, and e
 
 ## Sub-agents
 
-The `agent` tool launches a synchronous sub-agent with isolated messages and a restricted tool pool. Built-in types:
+The `agent` tool launches a focused sub-agent with isolated messages and a restricted tool pool. Built-in types:
 
 - `explore` — read-only codebase search and file inspection.
 - `review` — independent code review focused on bugs, regressions, and missing tests.
@@ -115,7 +115,15 @@ Example prompt inside the CLI:
 Use the explore sub-agent to find where MCP tools are registered. Report file paths and the call chain.
 ```
 
-The parent agent receives only the sub-agent's final report as a normal tool result; intermediate tool output stays out of the parent conversation.
+By default, the parent agent waits for the sub-agent and receives only the final report as a normal tool result; intermediate tool output stays out of the parent conversation.
+
+Sub-agents can also run in the background:
+
+```text
+Use the explore sub-agent with run_in_background=true to map the auth flow. Return the task id, then continue with the main task.
+```
+
+Background sub-agents return a `task_id` immediately. Use `task_list`, `task_output`, and `task_stop` to inspect progress, read the final report, or cancel the run. This is the thin Claude Code-style async slice: the task registry now supports `kind: shell | agent`, but interactive continuation/resume for background agents is intentionally deferred.
 
 Sub-agents can also run in an isolated git worktree:
 
@@ -123,18 +131,19 @@ Sub-agents can also run in an isolated git worktree:
 Use the general sub-agent with isolation="worktree" to make the risky refactor, then report the worktree path and branch.
 ```
 
-The synchronous worktree path follows Claude Code's shape: the agent tool accepts `isolation: "worktree"` and returns `Worktree path`, `Worktree branch`, `Worktree status`, and change counts. If the sub-agent makes no changes, the worktree is removed automatically; if it changes files or creates commits, the worktree is kept. Background sub-agents are intentionally deferred, so isolated synchronous sub-agents cannot start background shell tasks.
+The synchronous worktree path follows Claude Code's shape: the agent tool accepts `isolation: "worktree"` and returns `Worktree path`, `Worktree branch`, `Worktree status`, and change counts. If the sub-agent makes no changes, the worktree is removed automatically; if it changes files or creates commits, the worktree is kept. Background sub-agents cannot yet combine with `isolation: "worktree"`; that requires a stronger per-agent working-directory context instead of the current process-level project root.
 
 ## Background Tasks
 
-Long-running shell commands can be started without blocking the main agent loop:
+Long-running shell commands and background sub-agents can be started without blocking the main agent loop:
 
 - `run_background_command` starts a shell task and returns a `task_id` immediately.
+- `agent` with `run_in_background=true` starts an agent task and returns a `task_id` immediately.
 - `task_list` lists known tasks in the current agent process.
 - `task_output` reads output later, optionally blocking until completion.
-- `task_stop` stops a running background shell task.
+- `task_stop` stops a running background shell task or cancels a background sub-agent.
 
-Task output is written under `.jesse/task-output/`. The registry is shaped around `kind: shell | agent`; Step 24 implements shell tasks first, with async sub-agents intentionally left as the next extension.
+Task output is written under `.jesse/task-output/`. The registry is shaped around `kind: shell | agent`; shell tasks capture process output, and agent tasks capture bounded progress events plus the final report.
 
 ## Worktree Isolation
 
@@ -144,7 +153,7 @@ The main session can move into an isolated git worktree when the user explicitly
 - `exit_worktree` returns to the original project root with `action="keep"` or `action="remove"`.
 - `action="remove"` refuses to discard changed files or isolated commits unless `discard_changes=true` is explicitly provided.
 
-Worktree state is written to the JSONL transcript, so `--resume` can restore the active worktree. Sub-agent worktree isolation is intentionally deferred; the core state shape is ready for it.
+Worktree state is written to the JSONL transcript, so `--resume` can restore the active worktree. Synchronous sub-agent worktree isolation is implemented; background sub-agent worktree isolation remains deferred until the project root is scoped per agent run.
 
 ## Evaluation Harness
 

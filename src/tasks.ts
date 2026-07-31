@@ -1,10 +1,9 @@
 /**
  * tasks.ts - lightweight background task registry.
  *
- * This is the small version of Claude Code's task layer. The registry is
- * intentionally generic (`kind: shell | agent`) even though Step 24 only wires
- * shell commands. That keeps the public tools stable when async sub-agents are
- * added later.
+ * This is the small version of Claude Code's task layer. The registry supports
+ * both shell processes and background sub-agents through the same task_id,
+ * output, list, and stop surface.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -45,11 +44,14 @@ interface ShellTask extends BaseTask {
   outputStream: WriteStream
 }
 
-interface AgentTaskPlaceholder extends BaseTask {
+interface AgentTask extends BaseTask {
   kind: 'agent'
+  abortController: AbortController
+  outputStream: WriteStream
 }
 
-type BackgroundTask = ShellTask | AgentTaskPlaceholder
+type OutputBackedTask = ShellTask | AgentTask
+type BackgroundTask = ShellTask | AgentTask
 
 export interface TaskSnapshot {
   id: string
@@ -76,6 +78,18 @@ export interface StartShellTaskInput {
   command: string
   cwd?: unknown
   description?: string
+}
+
+export interface AgentTaskContext {
+  taskId: string
+  signal: AbortSignal
+  write(chunk: string | Buffer): void
+  updateActivity(activity: string): void
+}
+
+export interface StartAgentTaskInput {
+  description?: string
+  run: (context: AgentTaskContext) => Promise<void>
 }
 
 const tasks = new Map<string, BackgroundTask>()
@@ -149,6 +163,35 @@ export async function startShellTask(input: StartShellTaskInput): Promise<TaskSn
   return snapshotTask(task)
 }
 
+export async function startAgentTask(input: StartAgentTaskInput): Promise<TaskSnapshot> {
+  await mkdir(TASK_OUTPUT_DIR, { recursive: true })
+  registerProcessCleanup()
+
+  const id = createTaskId('agent')
+  const outputPath = join(TASK_OUTPUT_DIR, `${id}.log`)
+  const outputStream = createWriteStream(outputPath, { flags: 'a' })
+  const now = Date.now()
+  const task: AgentTask = {
+    id,
+    kind: 'agent',
+    description: normalizeDescription(input.description, 'background agent task'),
+    status: 'running',
+    startTime: now,
+    outputPath,
+    outputBytes: 0,
+    lastOutputAt: now,
+    lastActivity: 'started background agent',
+    abortController: new AbortController(),
+    outputStream,
+  }
+  tasks.set(id, task)
+
+  appendTaskOutput(task, `[agent task started] ${task.description}\n\n`)
+  void runAgentTask(task, input.run)
+
+  return snapshotTask(task)
+}
+
 export function listTasks(): TaskSnapshot[] {
   return Array.from(tasks.values())
     .sort((a, b) => b.startTime - a.startTime)
@@ -185,11 +228,15 @@ export async function stopTask(taskId: string): Promise<TaskSnapshot> {
   const task = tasks.get(taskId)
   if (!task) throw new Error(`找不到 task：${taskId}`)
   if (task.status !== 'running') throw new Error(`task ${taskId} 当前不是 running，而是 ${task.status}`)
-  if (task.kind !== 'shell') throw new Error(`task ${taskId} 的类型 ${task.kind} 暂不支持停止`)
 
   task.status = 'stopped'
   task.endTime = Date.now()
   appendTaskOutput(task, '\n[task stop requested]\n')
+
+  if (task.kind === 'agent') {
+    task.abortController.abort()
+    return snapshotTask(task)
+  }
 
   task.process.kill('SIGTERM')
   setTimeout(() => {
@@ -243,13 +290,51 @@ function snapshotTask(task: BackgroundTask): TaskSnapshot {
   return snapshot
 }
 
-function appendTaskOutput(task: ShellTask, chunk: string | Buffer): void {
+function appendTaskOutput(task: OutputBackedTask, chunk: string | Buffer): void {
   const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk
   if (!text) return
   task.outputBytes += Buffer.byteLength(text)
   task.lastOutputAt = Date.now()
   task.lastActivity = lastMeaningfulLine(text) ?? task.lastActivity
   task.outputStream.write(text)
+}
+
+async function runAgentTask(
+  task: AgentTask,
+  run: (context: AgentTaskContext) => Promise<void>,
+): Promise<void> {
+  try {
+    await run({
+      taskId: task.id,
+      signal: task.abortController.signal,
+      write: chunk => appendTaskOutput(task, chunk),
+      updateActivity: activity => {
+        task.lastActivity = activity
+        task.lastOutputAt = Date.now()
+      },
+    })
+
+    if (task.status === 'running') {
+      task.status = 'completed'
+      task.endTime = Date.now()
+      appendTaskOutput(task, '\n[task finished] status=completed\n')
+    } else if (task.status === 'stopped') {
+      appendTaskOutput(task, '\n[task finished] status=stopped\n')
+    }
+  } catch (err) {
+    if (task.status === 'stopped' || task.abortController.signal.aborted) {
+      task.status = 'stopped'
+      task.endTime = task.endTime ?? Date.now()
+      appendTaskOutput(task, '\n[task finished] status=stopped\n')
+    } else {
+      task.status = 'failed'
+      task.error = err instanceof Error ? err.message : String(err)
+      task.endTime = Date.now()
+      appendTaskOutput(task, `\n[task error] ${task.error}\n`)
+    }
+  } finally {
+    task.outputStream.end()
+  }
 }
 
 function lastMeaningfulLine(text: string): string | undefined {
@@ -336,6 +421,8 @@ function registerProcessCleanup(): void {
     for (const task of tasks.values()) {
       if (task.status === 'running' && task.kind === 'shell') {
         task.process.kill('SIGTERM')
+      } else if (task.status === 'running' && task.kind === 'agent') {
+        task.abortController.abort()
       }
     }
   })

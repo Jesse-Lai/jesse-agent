@@ -249,6 +249,8 @@ function describeDangerousAction(toolName: string, args: Record<string, unknown>
     return [
       `即将启动子 agent：${String(args.subagent_type ?? 'general')}`,
       `description：${String(args.description ?? '')}`,
+      `run_in_background：${args.run_in_background === true ? 'true' : 'false'}`,
+      `isolation：${String(args.isolation ?? '(none)')}`,
       `prompt：${previewText(String(args.prompt ?? ''), 500)}`,
     ].join('\n')
   }
