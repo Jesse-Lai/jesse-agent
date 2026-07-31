@@ -46,6 +46,14 @@ export interface ExitWorktreeResult {
   commits?: number
 }
 
+export interface AgentWorktreeCleanupResult {
+  status: 'removed' | 'kept'
+  session: WorktreeSession
+  changedFiles: number
+  commits: number
+  message: string
+}
+
 let activeSessionId: string | null = null
 let appendWorktreeEvent: ((event: WorktreeEventInput) => Promise<void> | void) | null = null
 let currentWorktreeSession: WorktreeSession | null = null
@@ -83,41 +91,46 @@ export async function enterWorktree(input: { name?: unknown } = {}): Promise<Wor
   }
 
   const name = normalizeWorktreeName(input.name, activeSessionId)
-  validateWorktreeName(name)
+  const session = await createWorktreeSession(name, activeSessionId, getProjectRoot())
 
-  const originalCwd = getProjectRoot()
-  const gitRoot = await findGitRoot(originalCwd)
-  const originalHeadCommit = (await gitOrThrow(['rev-parse', 'HEAD'], gitRoot)).trim()
-  const originalBranch = (await git(['branch', '--show-current'], gitRoot)).stdout.trim() || undefined
-  const worktreePath = join(gitRoot, WORKTREE_DIR, name)
-  const worktreeBranch = `jesse-worktree-${name}`
-
-  await mkdir(join(gitRoot, WORKTREE_DIR), { recursive: true })
-  await gitOrThrow(['worktree', 'add', '-b', worktreeBranch, worktreePath, 'HEAD'], gitRoot)
-
-  const session: WorktreeSession = {
-    sessionId: activeSessionId,
-    originalCwd,
-    gitRoot,
-    worktreeName: name,
-    worktreePath,
-    worktreeBranch,
-    originalBranch,
-    originalHeadCommit,
-    createdAt: new Date().toISOString(),
-  }
-
-  process.chdir(worktreePath)
-  await setProjectRoot(worktreePath)
+  process.chdir(session.worktreePath)
+  await setProjectRoot(session.worktreePath)
   currentWorktreeSession = session
 
   await emitWorktreeEvent({
     action: 'entered',
     session,
-    message: `Entered worktree ${worktreePath} on branch ${worktreeBranch}.`,
+    message: `Entered worktree ${session.worktreePath} on branch ${session.worktreeBranch}.`,
   })
 
   return session
+}
+
+export async function createAgentWorktree(input: { name?: unknown; agentId: string }): Promise<WorktreeSession> {
+  const name = normalizeWorktreeName(input.name, input.agentId)
+  return await createWorktreeSession(name, input.agentId, getProjectRoot())
+}
+
+export async function finishAgentWorktree(session: WorktreeSession): Promise<AgentWorktreeCleanupResult> {
+  const changeSummary = await countWorktreeChanges(session)
+  if (changeSummary.changedFiles > 0 || changeSummary.commits > 0) {
+    return {
+      status: 'kept',
+      session,
+      changedFiles: changeSummary.changedFiles,
+      commits: changeSummary.commits,
+      message: `Agent worktree kept at ${session.worktreePath} because it has ${changeSummary.changedFiles} changed file(s) and ${changeSummary.commits} commit(s).`,
+    }
+  }
+
+  const branchWarning = await removeWorktreeSession(session)
+  return {
+    status: 'removed',
+    session,
+    changedFiles: 0,
+    commits: 0,
+    message: `Agent worktree removed: ${session.worktreePath}.${branchWarning}`,
+  }
 }
 
 export async function exitWorktree(input: ExitWorktreeInput): Promise<ExitWorktreeResult> {
@@ -159,11 +172,9 @@ export async function exitWorktree(input: ExitWorktreeInput): Promise<ExitWorktr
   }
 
   await restoreOriginalCwd(session)
-  await gitOrThrow(['worktree', 'remove', '--force', session.worktreePath], session.gitRoot)
-  const deleteBranch = await git(['branch', '-D', session.worktreeBranch], session.gitRoot)
+  const branchWarning = await removeWorktreeSession(session)
   currentWorktreeSession = null
 
-  const branchWarning = deleteBranch.code === 0 ? '' : ` Branch cleanup failed: ${deleteBranch.stderr.trim()}`
   const message = `Exited and removed worktree ${session.worktreePath}.${branchWarning}`
   await emitWorktreeEvent({ action: 'removed', session: null, message })
   return {
@@ -189,6 +200,37 @@ export function formatWorktreePromptContext(): string {
 async function restoreOriginalCwd(session: WorktreeSession): Promise<void> {
   process.chdir(session.originalCwd)
   await setProjectRoot(session.originalCwd)
+}
+
+async function createWorktreeSession(name: string, sessionId: string, originalCwd: string): Promise<WorktreeSession> {
+  validateWorktreeName(name)
+
+  const gitRoot = await findGitRoot(originalCwd)
+  const originalHeadCommit = (await gitOrThrow(['rev-parse', 'HEAD'], gitRoot)).trim()
+  const originalBranch = (await git(['branch', '--show-current'], gitRoot)).stdout.trim() || undefined
+  const worktreePath = join(gitRoot, WORKTREE_DIR, name)
+  const worktreeBranch = `jesse-worktree-${name}`
+
+  await mkdir(join(gitRoot, WORKTREE_DIR), { recursive: true })
+  await gitOrThrow(['worktree', 'add', '-b', worktreeBranch, worktreePath, 'HEAD'], gitRoot)
+
+  return {
+    sessionId,
+    originalCwd,
+    gitRoot,
+    worktreeName: name,
+    worktreePath,
+    worktreeBranch,
+    originalBranch,
+    originalHeadCommit,
+    createdAt: new Date().toISOString(),
+  }
+}
+
+async function removeWorktreeSession(session: WorktreeSession): Promise<string> {
+  await gitOrThrow(['worktree', 'remove', '--force', session.worktreePath], session.gitRoot)
+  const deleteBranch = await git(['branch', '-D', session.worktreeBranch], session.gitRoot)
+  return deleteBranch.code === 0 ? '' : ` Branch cleanup failed: ${deleteBranch.stderr.trim()}`
 }
 
 async function countWorktreeChanges(session: WorktreeSession): Promise<{ changedFiles: number; commits: number }> {

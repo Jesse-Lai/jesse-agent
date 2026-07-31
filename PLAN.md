@@ -319,7 +319,7 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Keep worktree metadata in the session transcript so resume works
 - [x] Ship first slice: `enter_worktree` / `exit_worktree` for the main session, with dynamic project root switching
 - [x] Refuse destructive worktree removal when there are changed files or isolated commits unless explicitly confirmed
-- [ ] Add sub-agent `isolation: "worktree"` on top of the same worktree core
+- [x] Add synchronous sub-agent `isolation: "worktree"` on top of the same worktree core, with Claude Code-compatible result fields for future background agents
 - **Why:** Parallel edits should not corrupt the main working tree.
 
 ### Step 26: Evaluation Harness

@@ -8,10 +8,12 @@
  * evals later.
  */
 
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 import { runAgent, type AgentEvent } from '../loop.js'
 import type { LLMStreamer, Message, ToolCall } from '../llm.js'
 import type { Tool } from '../types.js'
@@ -21,8 +23,10 @@ import { getOriginalProjectRoot, setProjectRoot } from '../workingDirectory.js'
 import { editFileTool } from '../tools/editFile.js'
 import { readFileTool } from '../tools/readFile.js'
 import { runCommandTool } from '../tools/runCommand.js'
+import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
+const execFileAsync = promisify(execFile)
 
 interface EvalCheck {
   name: string
@@ -47,6 +51,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runValidationEval,
     runReadBeforeWriteEval,
     runReadEditVerifyEval,
+    runAgentWorktreeIsolationEval,
   ]
 
   const results: EvalResult[] = []
@@ -154,6 +159,23 @@ async function runReadEditVerifyEval(): Promise<EvalResult> {
     check(checks, 'verification command ran and passed', Boolean(runResult?.content.includes('math ok')), runResult?.content)
     check(checks, 'final answer reports verification', finalText(events).includes('npm run test') && finalText(events).includes('VERDICT: PASS'))
     check(checks, 'script consumed every fake model step', unusedSteps === 0, `${unusedSteps} unused step(s)`)
+  }, root)
+}
+
+async function runAgentWorktreeIsolationEval(): Promise<EvalResult> {
+  const root = await createGitProject('agent-worktree-isolation')
+
+  return runCase('agent-worktree-isolation-cleanup', async checks => {
+    await setProjectRoot(root)
+
+    const session = await createAgentWorktree({ agentId: 'eval-agent-worktree' })
+    const result = await finishAgentWorktree(session)
+    const existsAfterCleanup = await pathExists(session.worktreePath)
+
+    check(checks, 'worktree was created under project', session.worktreePath.startsWith(root), session.worktreePath)
+    check(checks, 'unchanged worktree was removed', result.status === 'removed', result.message)
+    check(checks, 'cleanup reported no changes', result.changedFiles === 0 && result.commits === 0, result.message)
+    check(checks, 'worktree directory no longer exists', !existsAfterCleanup, session.worktreePath)
   }, root)
 }
 
@@ -279,6 +301,34 @@ async function createMathProject(prefix: string): Promise<string> {
     'utf8',
   )
   return await realpath(root)
+}
+
+async function createGitProject(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), `jesse-eval-${prefix}-`))
+  await writeFile(join(root, 'README.md'), '# eval repo\n', 'utf8')
+  await git(['init'], root)
+  await git(['config', 'user.email', 'eval@example.test'], root)
+  await git(['config', 'user.name', 'Jesse Eval'], root)
+  await git(['add', 'README.md'], root)
+  await git(['commit', '-m', 'initial commit'], root)
+  return await realpath(root)
+}
+
+async function git(args: string[], cwd: string): Promise<void> {
+  try {
+    await execFileAsync('git', args, { cwd })
+  } catch (err) {
+    throw new Error(`git ${args.join(' ')} failed in ${cwd}: ${String(err)}`)
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function check(checks: EvalCheck[], name: string, passed: boolean, details?: string): void {

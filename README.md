@@ -117,6 +117,14 @@ Use the explore sub-agent to find where MCP tools are registered. Report file pa
 
 The parent agent receives only the sub-agent's final report as a normal tool result; intermediate tool output stays out of the parent conversation.
 
+Sub-agents can also run in an isolated git worktree:
+
+```text
+Use the general sub-agent with isolation="worktree" to make the risky refactor, then report the worktree path and branch.
+```
+
+The synchronous worktree path follows Claude Code's shape: the agent tool accepts `isolation: "worktree"` and returns `Worktree path`, `Worktree branch`, `Worktree status`, and change counts. If the sub-agent makes no changes, the worktree is removed automatically; if it changes files or creates commits, the worktree is kept. Background sub-agents are intentionally deferred, so isolated synchronous sub-agents cannot start background shell tasks.
+
 ## Background Tasks
 
 Long-running shell commands can be started without blocking the main agent loop:

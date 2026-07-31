@@ -198,7 +198,7 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
         <div class="phase-body">
             <div class="step" data-status="done"><div class="s-title">Step 23 · Plan Mode</div><div class="s-desc">只读规划，exit_plan_mode 保存计划并请求批准，批准后进入执行</div><div class="s-file">src/planMode.ts · src/tools/exitPlanMode.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 24 · Background Tasks</div><div class="s-desc">统一 task registry，后台 shell 可启动、列表、读输出、停止；sub-agent 留好扩展口</div><div class="s-file">src/tasks.ts · src/tools/task*.ts</div></div>
-            <div class="step" data-status="done"><div class="s-title">Step 25 · Worktree 隔离</div><div class="s-desc">enter/exit worktree，动态切换项目根目录，JSONL 记录可恢复</div><div class="s-file">src/worktrees.ts · src/tools/enterWorktree.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 25 · Worktree 隔离</div><div class="s-desc">enter/exit worktree；sub-agent 支持 isolation=&quot;worktree&quot;，无改动自动清理、有改动保留路径</div><div class="s-file">src/worktrees.ts · src/tools/enterWorktree.ts · src/tools/agent.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 26 · Evaluation Harness</div><div class="s-desc">npm run eval，用 scripted LLM 驱动真实 loop，检查校验、安全、编辑和验证行为</div><div class="s-file">src/evals/runner.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 27 · Coding Interfaces</div><div class="s-desc">CLI renderer、工具活动摘要、edit/write diff、/diff、/sessions、文件链接和 task progress</div><div class="s-file">src/cliRenderer.ts · src/diff.ts · src/gitDiff.ts · src/taskDisplay.ts</div><span class="tag">complete slice</span></div>
         </div>
