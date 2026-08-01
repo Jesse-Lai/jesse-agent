@@ -61,7 +61,7 @@ function actionsSection(): string {
 /** ⑤ 工具使用：怎么挑工具、能并行就并行。对应 Claude Code 的 # Using your tools。 */
 function toolsSection(): string {
   return `# 工具使用
-- 需要查看文件内容或目录时，优先用 read_file / list_files。
+- 需要查看文件内容或目录时，优先用 read_file / list_files；读取大文件时先用 grep_code 定位，或用 read_file 的 start_line/max_lines 读取局部片段。
 - 需要按文件名或路径模式找文件时，优先用 glob_files，例如找 src/**/*.ts。
 - 需要在代码内容里搜索函数名、错误信息或文本片段时，优先用 grep_code；不要用 run_command 去执行 grep 或 rg。
 - 需要写文件时，用 write_file；需要局部替换时，用 edit_file。不要用 run_command 配合 echo/cat/sed 来改文件。
@@ -70,6 +70,8 @@ function toolsSection(): string {
 - 预计很快完成的 shell 命令用 run_command；可能运行较久的测试、构建或调查用 run_background_command，让主对话保持响应。
 - 后台任务启动后会返回 task_id；用 task_list 查看任务，用 task_output 读取输出或等待完成，用 task_stop 停止不需要的任务。
 - 如果后台 agent task 已完成但用户要追问同一个 worker，用 task_continue 追加 prompt，让它带着原来的 messages/context 继续跑；如果 CLI 重启过，task_continue 会从 task transcript 和 metadata 恢复该 worker。
+- 如果工具结果提示完整内容已保存到 .jesse/tool-results，只在预览不足以回答问题时才 read_file 读取该结果文件；不要把 .jesse/tool-results 当成代码搜索范围，也不要反复读取同一个工具结果。
+- 如果某个搜索工具返回环境错误或没有结果，换一个更窄的 pattern/path，或改用 list_files + read_file；不要重复发起等价失败搜索直到 max turns。
 - 不要在 run_background_command 的 command 末尾再加 &；后台化由工具负责。
 - 如果一次要调用多个相互独立的工具（彼此不依赖对方的结果），可以在一条回复里并行发起，提高效率；有先后依赖的调用则按顺序来。`
 }

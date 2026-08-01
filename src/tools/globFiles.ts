@@ -1,5 +1,5 @@
 /**
- * globFiles.ts - find files by path/name pattern (read-only)
+ * globFiles.ts - find files by path/name pattern with ripgrep or a Node fallback (read-only)
  *
  * This is the simplified version of Claude Code's GlobTool. It gives the model
  * a safe, structured way to find files without using shell commands directly.
@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { resolveWorkingDirectory } from '../workingDirectory.js'
+import { fallbackGlobFiles } from './searchFallback.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -22,7 +23,7 @@ export const globFilesTool: Tool = {
   name: 'glob_files',
 
   description:
-    '按 glob 模式查找文件路径。适合先定位可能相关的文件，例如 pattern="src/**/*.ts"。' +
+    '按 glob 模式查找文件路径。优先使用 ripgrep；如果本机没有 rg，会自动使用内置 Node fallback。适合先定位可能相关的文件，例如 pattern="src/**/*.ts"。' +
     '参数 pattern 是文件路径匹配模式；path 是搜索目录，默认当前目录；max_results 限制返回数量。',
 
   parameters: {
@@ -65,11 +66,32 @@ export const globFilesTool: Tool = {
     } catch (err) {
       const error = err as ExecFileError
       if (error.code === 1 && !error.stdout) return '未找到匹配文件。'
-      if (error.code === 'ENOENT') return '执行失败：未找到 rg（ripgrep）。请先安装 ripgrep。'
+      if (error.code === 'ENOENT') return await runFallbackGlob({ pattern, path, maxResults, context })
       const stderr = error.stderr?.trim()
       return `查找文件失败：${stderr || error.message || String(err)}`
     }
   },
+}
+
+async function runFallbackGlob(input: {
+  pattern: string
+  path: string
+  maxResults: number
+  context?: AgentRuntimeContext
+}): Promise<string> {
+  const cwd = await resolveWorkingDirectory(input.path, input.context)
+  const files = await fallbackGlobFiles({
+    projectRoot: cwd.projectRoot,
+    searchRoot: cwd.absolutePath,
+    pattern: input.pattern,
+    maxResults: input.maxResults,
+  })
+  if (files.length === 0) return '未找到匹配文件。'
+
+  return [
+    `未找到 rg，已使用内置 glob fallback。找到 ${files.length} 个匹配文件：`,
+    ...files,
+  ].join('\n')
 }
 
 interface ExecFileError extends Error {

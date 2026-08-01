@@ -44,7 +44,7 @@ export async function budgetToolResult(toolName: string, content: string): Promi
 
   return [
     `工具 "${toolName}" 的结果过长（${content.length.toLocaleString()} 字符），完整内容已保存到：${filePath}`,
-    `给模型的上下文只保留预览，避免撑爆上下文。`,
+    '给模型的上下文只保留预览，避免撑爆上下文。只有当预览不足以回答当前问题时，才读取这个完整结果文件；不要反复读取 tool-results。',
     '',
     '--- 结果开头预览 ---',
     head,

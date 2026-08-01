@@ -18,12 +18,14 @@ export const readFileTool: Tool = {
   // 这段文字决定模型用得对不对，是工具最重要的部分。
   description:
     '读取本地文件系统中一个文件的内容。参数 path 传文件路径（相对或绝对均可）。' +
-    '返回文件的纯文本内容。只能读文件，不能读目录（读目录请用 list_files）。',
+    '可选 start_line 和 max_lines 用来读取大文件的局部行范围。只能读文件，不能读目录（读目录请用 list_files）。',
 
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string', description: '要读取的文件路径' },
+      start_line: { type: 'number', description: '可选。起始行号，1-based。省略则从文件开头读取。' },
+      max_lines: { type: 'number', description: '可选。最多返回多少行。适合读取大文件局部片段。' },
     },
     required: ['path'],
   },
@@ -38,6 +40,8 @@ export const readFileTool: Tool = {
       const normalizedPath = resolveToolPath(path, context)
       const content = await fsReadFile(normalizedPath, 'utf-8')
       await rememberReadFile(normalizedPath, content, context)
+      const ranged = applyLineRange(content, args.start_line, args.max_lines)
+      if (ranged) return ranged
       // 返回文本结果。这段会被喂回给模型（Phase 3 的 loop）。
       return content
     } catch (err) {
@@ -46,4 +50,27 @@ export const readFileTool: Tool = {
       return `读取文件失败：${String(err)}`
     }
   },
+}
+
+function applyLineRange(content: string, startLineInput: unknown, maxLinesInput: unknown): string | null {
+  const startLine = normalizePositiveInteger(startLineInput)
+  const maxLines = normalizePositiveInteger(maxLinesInput)
+  if (!startLine && !maxLines) return null
+
+  const lines = content.split('\n')
+  const startIndex = Math.max(0, (startLine ?? 1) - 1)
+  const endIndex = maxLines ? startIndex + maxLines : lines.length
+  const selected = lines.slice(startIndex, endIndex)
+  const endLine = startIndex + selected.length
+  return [
+    `--- ${startIndex + 1}-${endLine} / ${lines.length} lines ---`,
+    selected.join('\n'),
+    ...(endLine < lines.length ? [`--- ${lines.length - endLine} line(s) omitted ---`] : []),
+  ].join('\n')
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return Math.floor(parsed)
 }

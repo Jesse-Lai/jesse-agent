@@ -1,5 +1,5 @@
 /**
- * grepCode.ts - search code contents with ripgrep (read-only)
+ * grepCode.ts - search code contents with ripgrep or a Node fallback (read-only)
  *
  * This is the simplified version of Claude Code's GrepTool. It gives the model
  * a safe content-search tool and avoids using run_command for grep/rg searches.
@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { resolveWorkingDirectory } from '../workingDirectory.js'
+import { fallbackGrepCode } from './searchFallback.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -22,7 +23,7 @@ export const grepCodeTool: Tool = {
   name: 'grep_code',
 
   description:
-    '用 ripgrep 搜索文件内容，返回匹配行。适合查找函数名、错误信息、变量名或代码片段。' +
+    '搜索文件内容，返回匹配行。优先使用 ripgrep；如果本机没有 rg，会自动使用内置 Node fallback。适合查找函数名、错误信息、变量名或代码片段。' +
     '参数 pattern 是正则或文本模式；path 是搜索目录/文件，默认当前目录；glob 可限制文件类型；max_results 限制返回数量。',
 
   parameters: {
@@ -71,7 +72,7 @@ export const grepCodeTool: Tool = {
     } catch (err) {
       const error = err as ExecFileError
       if (error.code === 1) return '未找到匹配内容。'
-      if (error.code === 'ENOENT') return '执行失败：未找到 rg（ripgrep）。请先安装 ripgrep。'
+      if (error.code === 'ENOENT') return await runFallbackSearch({ pattern, path, glob, maxResults, ignoreCase, context })
       const stdout = error.stdout?.trim()
       if (stdout) return formatMatches(stdout, maxResults)
       const stderr = error.stderr?.trim()
@@ -96,6 +97,31 @@ function formatMatches(stdout: string, maxResults: number): string {
     `找到 ${matches.length} 条匹配${truncated ? `，显示前 ${shown.length} 条` : ''}：`,
     ...shown,
     ...(truncated ? ['结果已截断。请缩小 pattern/path/glob，或提高 max_results。'] : []),
+  ].join('\n')
+}
+
+async function runFallbackSearch(input: {
+  pattern: string
+  path: string
+  glob: string
+  maxResults: number
+  ignoreCase: boolean
+  context?: AgentRuntimeContext
+}): Promise<string> {
+  const cwd = await resolveWorkingDirectory(input.path, input.context)
+  const matches = await fallbackGrepCode({
+    projectRoot: cwd.projectRoot,
+    searchRoot: cwd.absolutePath,
+    pattern: input.pattern,
+    glob: input.glob || undefined,
+    maxResults: input.maxResults,
+    ignoreCase: input.ignoreCase,
+  })
+  if (matches.length === 0) return '未找到匹配内容。'
+
+  return [
+    `未找到 rg，已使用内置搜索 fallback。找到 ${matches.length} 条匹配：`,
+    ...matches.map(match => `${match.path}:${match.line}:${match.text}`),
   ].join('\n')
 }
 

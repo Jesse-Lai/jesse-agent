@@ -234,10 +234,12 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 ### Step 15: Code Search Tools
 - [x] Add `glob` for fast file pattern matching
 - [x] Add `grep` backed by `rg` for content search
+- [x] Add dependency-free Node fallback for `glob_files` / `grep_code` when `rg` is not installed
 - [x] Teach the prompt to prefer `glob`/`grep` over shell `find`/`grep` when possible
 - **Why:** A coding agent spends most of its time locating relevant files. Dedicated search tools are safer and more structured than arbitrary shell commands.
 
 ### Step 16: File Write and Edit Tools
+- [x] Add optional `start_line` / `max_lines` to `read_file` so large files can be inspected in bounded chunks
 - [x] Add `write_file` for new files or full replacement
 - [x] Add `edit_file` for targeted string replacement or patch-style edits
 - [x] Enforce read-before-write: the agent should read a file before editing it
@@ -327,6 +329,7 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Run the agent against them after prompt/tool changes
 - [x] Track regressions in tool use, safety, edit quality, and verification behavior
 - [x] Ship first slice: `npm run eval` with a deterministic scripted LLM that drives the real loop/tool pipeline
+- [x] Add regressions for missing-`rg` search fallback and bounded `read_file` ranges
 - **Why:** Agent quality is too easy to judge by vibes. A coding agent needs repeatable checks.
 
 ### Step 27: Better Coding Interfaces

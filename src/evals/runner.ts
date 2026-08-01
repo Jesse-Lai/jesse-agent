@@ -29,6 +29,7 @@ import { restoreBackgroundAgentTask } from '../tools/agent.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
 import { continueAgentTask, readTaskOutput, startAgentTask } from '../tasks.js'
 import { createAgentRuntimeContext } from '../runtimeContext.js'
+import { fallbackGlobFiles, fallbackGrepCode } from '../tools/searchFallback.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
 const execFileAsync = promisify(execFile)
@@ -62,6 +63,8 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runBackgroundAgentWorktreeContextEval,
     runBackgroundAgentContinuationEval,
     runBackgroundAgentCrossProcessResumeEval,
+    runSearchFallbackEval,
+    runReadFileRangeEval,
   ]
 
   const results: EvalResult[] = []
@@ -378,6 +381,61 @@ async function runBackgroundAgentCrossProcessResumeEval(): Promise<EvalResult> {
     check(checks, 'continued output includes restored answer', output.output.includes('Restored continuation answered'), output.output)
     check(checks, 'transcript persisted follow-up prompt', transcript.includes('follow up after restart'), transcript)
     check(checks, 'scripted continuation was consumed', steps.length === 0, `${steps.length} unused step(s)`)
+  }, root)
+}
+
+async function runSearchFallbackEval(): Promise<EvalResult> {
+  const root = await mkdtemp(join(tmpdir(), 'jesse-eval-search-fallback-'))
+  await mkdir(join(root, 'src', 'tools'), { recursive: true })
+  await mkdir(join(root, '.jesse', 'tool-results'), { recursive: true })
+  await writeFile(join(root, 'src', 'tools', 'taskContinue.ts'), 'export const task_continue = true\n', 'utf8')
+  await writeFile(join(root, 'src', 'tools', 'other.ts'), 'export const other = false\n', 'utf8')
+  await writeFile(join(root, '.jesse', 'tool-results', 'old.txt'), 'task_continue should be ignored here\n', 'utf8')
+  const realRoot = await realpath(root)
+
+  return runCase('search-fallback-without-rg', async checks => {
+    const files = await fallbackGlobFiles({
+      projectRoot: realRoot,
+      searchRoot: realRoot,
+      pattern: 'src/**/*.ts',
+      maxResults: 10,
+    })
+    const matches = await fallbackGrepCode({
+      projectRoot: realRoot,
+      searchRoot: realRoot,
+      pattern: 'task_continue',
+      glob: '*.ts',
+      maxResults: 10,
+      ignoreCase: false,
+    })
+
+    check(checks, 'fallback glob found TypeScript files', files.includes('src/tools/taskContinue.ts') && files.includes('src/tools/other.ts'), files.join('\n'))
+    check(checks, 'fallback grep found code match', matches.some(match => match.path === 'src/tools/taskContinue.ts'), JSON.stringify(matches))
+    check(checks, 'fallback grep ignored tool results', matches.every(match => !match.path.includes('.jesse/tool-results')), JSON.stringify(matches))
+  }, root)
+}
+
+async function runReadFileRangeEval(): Promise<EvalResult> {
+  const root = await mkdtemp(join(tmpdir(), 'jesse-eval-read-range-'))
+  await writeFile(join(root, 'range.txt'), ['one', 'two', 'three', 'four'].join('\n'), 'utf8')
+  const realRoot = await realpath(root)
+
+  return runCase('read-file-line-range', async checks => {
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-read-range',
+      projectRoot: realRoot,
+      cwd: realRoot,
+      originalProjectRoot: realRoot,
+    })
+    const result = await readFileTool.execute({
+      path: 'range.txt',
+      start_line: 2,
+      max_lines: 2,
+    }, context)
+
+    check(checks, 'range header reports selected lines', result.includes('--- 2-3 / 4 lines ---'), result)
+    check(checks, 'range includes requested lines', result.includes('two\nthree'), result)
+    check(checks, 'range excludes outside lines', !result.includes('one') && !result.includes('four'), result)
   }, root)
 }
 

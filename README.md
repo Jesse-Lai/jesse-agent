@@ -100,6 +100,10 @@ Local MCP servers can be configured in `.jesse/mcp.json`:
 
 On startup, the agent connects to local stdio servers, calls `tools/list`, and exposes each tool as `mcp__server__tool`, matching Claude Code's namespacing style. MCP tools still go through the same `validate -> permission -> call` pipeline as built-in tools. Remote transports, OAuth, resources, prompts, and MCP UI are intentionally deferred.
 
+## Code Tools
+
+Code search uses `glob_files` for path patterns and `grep_code` for content search. Both prefer `rg` when it is installed, but fall back to dependency-free Node search if ripgrep is missing. `read_file` can read a whole file or a bounded line range with `start_line` and `max_lines`, which keeps large files from flooding the model context.
+
 ## Sub-agents
 
 The `agent` tool launches a focused sub-agent with isolated messages and a restricted tool pool. Built-in types:

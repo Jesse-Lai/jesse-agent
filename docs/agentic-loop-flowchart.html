@@ -174,8 +174,8 @@ h1 { text-align:center; font-size:24px; color:#58a6ff; margin-bottom:6px; }
     <div class="phase done">
         <div class="phase-head"><div>Phase 6 · Coding Tools 与安全<div class="milestone">能检查代码、修改代码、运行验证</div></div><span class="phase-status">✅</span></div>
         <div class="phase-body">
-            <div class="step" data-status="done"><div class="s-title">Step 15 · 代码搜索工具</div><div class="s-desc">glob 匹配文件，grep / rg 搜索代码内容</div><div class="s-file">src/tools/globFiles.ts · grepCode.ts</div></div>
-            <div class="step" data-status="done"><div class="s-title">Step 16 · 文件写入与编辑工具</div><div class="s-desc">write_file、edit_file、读后写、预览风险编辑</div><div class="s-file">src/tools/writeFile.ts · editFile.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 15 · 代码搜索工具</div><div class="s-desc">glob/grep 搜索代码；rg 缺失时自动走 Node fallback</div><div class="s-file">src/tools/globFiles.ts · grepCode.ts · searchFallback.ts</div></div>
+            <div class="step" data-status="done"><div class="s-title">Step 16 · 文件写入与编辑工具</div><div class="s-desc">read_file 可读局部行范围；write/edit 支持读后写和风险预览</div><div class="s-file">src/tools/readFile.ts · writeFile.ts · editFile.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 17 · Bash 安全与权限规则</div><div class="s-desc">allow / ask、危险命令拦截、cwd 约束、权限模式</div><div class="s-file">permissions.ts · bashClassifier.ts</div></div>
             <div class="step" data-status="done"><div class="s-title">Step 18 · Git、测试与验证流程</div><div class="s-desc">按 Claude Code 风格约束 Git 操作，完成前优先验证</div><div class="s-file">src/prompt.ts</div></div>
         </div>
