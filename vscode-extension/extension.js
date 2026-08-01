@@ -1,9 +1,13 @@
 const cp = require('node:child_process')
 const fs = require('node:fs')
+const http = require('node:http')
 const path = require('node:path')
 const vscode = require('vscode')
 
 let chatPanel = null
+let ideServer = null
+let ideServerStartPromise = null
+let chatMessages = []
 
 function activate(context) {
   context.subscriptions.push(
@@ -13,7 +17,11 @@ function activate(context) {
   )
 }
 
-function deactivate() {}
+function deactivate() {
+  if (ideServer?.process) ideServer.process.kill()
+  ideServer = null
+  ideServerStartPromise = null
+}
 
 function openChat(context) {
   const panel = ensureChatPanel(context)
@@ -89,14 +97,20 @@ async function runPromptFromEditor(context, prompt, options) {
   panel.webview.postMessage({ type: 'user', text: prompt, context: summarizeContext(editorContext) })
 
   try {
-    await runAgentBridge(context, {
+    const result = await runAgentBridge(context, {
       prompt,
+      messages: chatMessages,
       context: editorContext,
       permissionMode: getPermissionMode(),
       maxTurns: 8,
     }, output => {
       panel.webview.postMessage(output)
     })
+    if (result.assistantText.trim()) {
+      chatMessages.push({ role: 'user', content: prompt })
+      chatMessages.push({ role: 'assistant', content: result.assistantText.trim() })
+      chatMessages = chatMessages.slice(-12)
+    }
   } catch (error) {
     panel.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
   }
@@ -146,22 +160,34 @@ function getPermissionMode() {
   return vscode.workspace.getConfiguration('jesseAgent').get('permissionMode', 'plan')
 }
 
-function runAgentBridge(context, request, onOutput) {
-  return new Promise((resolve, reject) => {
+async function runAgentBridge(context, request, onOutput) {
+  const server = await ensureIdeServer(context)
+  return await postAgentRequest(server, request, onOutput)
+}
+
+async function ensureIdeServer(context) {
+  if (ideServer?.port && ideServer.process.exitCode === null) return Promise.resolve(ideServer)
+  if (ideServerStartPromise) return ideServerStartPromise
+
+  ideServerStartPromise = new Promise((resolve, reject) => {
     const agentRoot = resolveAgentRoot(context)
     if (!agentRoot) {
       reject(new Error('Could not find jesse-agent root. Set jesseAgent.agentRoot in VS Code settings.'))
       return
     }
 
-    const child = cp.spawn(npmCommand(), ['run', 'ide', '--silent'], {
+    const child = cp.spawn(npmCommand(), ['run', 'ide:server', '--silent'], {
       cwd: agentRoot,
       env: { ...process.env, FORCE_COLOR: '0' },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
 
     let stdoutBuffer = ''
     let stderrText = ''
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error(stderrText.trim() || 'Timed out starting Jesse Agent server.'))
+    }, 15_000)
 
     child.stdout.on('data', chunk => {
       stdoutBuffer += chunk.toString('utf8')
@@ -170,9 +196,14 @@ function runAgentBridge(context, request, onOutput) {
       for (const line of lines) {
         if (!line.trim()) continue
         try {
-          onOutput(mapBridgeOutput(JSON.parse(line)))
+          const message = JSON.parse(line)
+          if (message.type === 'server_ready') {
+            clearTimeout(timer)
+            ideServer = { process: child, host: message.host || '127.0.0.1', port: message.port, agentRoot }
+            resolve(ideServer)
+          }
         } catch (error) {
-          onOutput({ type: 'log', text: line })
+          // Keep waiting for a valid ready message.
         }
       }
     })
@@ -181,24 +212,104 @@ function runAgentBridge(context, request, onOutput) {
       stderrText += chunk.toString('utf8')
     })
 
-    child.on('error', reject)
+    child.on('error', error => {
+      clearTimeout(timer)
+      reject(error)
+    })
     child.on('close', code => {
-      if (stdoutBuffer.trim()) {
-        try {
-          onOutput(mapBridgeOutput(JSON.parse(stdoutBuffer.trim())))
-        } catch {
-          onOutput({ type: 'log', text: stdoutBuffer.trim() })
-        }
-      }
-      if (code === 0) {
-        resolve()
-      } else {
+      clearTimeout(timer)
+      if (ideServer?.process === child) ideServer = null
+      ideServerStartPromise = null
+      if (!ideServer && code !== 0) {
         reject(new Error(stderrText.trim() || `Jesse Agent bridge exited with code ${code}`))
       }
     })
-
-    child.stdin.end(JSON.stringify(request))
   })
+
+  try {
+    return await ideServerStartPromise
+  } finally {
+    ideServerStartPromise = null
+  }
+}
+
+function postAgentRequest(server, request, onOutput) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(request)
+    const httpRequest = http.request({
+      host: server.host,
+      port: server.port,
+      path: '/ask',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+    }, response => {
+      let buffer = ''
+      let errorBody = ''
+      let assistantDeltaText = ''
+      let assistantFinalText = ''
+
+      response.on('data', chunk => {
+        const text = chunk.toString('utf8')
+        if (response.statusCode !== 200) {
+          errorBody += text
+          return
+        }
+
+        buffer += text
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const output = JSON.parse(line)
+            const event = output.type === 'agent_event' ? output.event : null
+            if (event?.type === 'assistant_delta') assistantDeltaText += event.text
+            if (event?.type === 'assistant_text') assistantFinalText = event.text
+            onOutput(mapBridgeOutput(output))
+          } catch {
+            onOutput({ type: 'log', text: line })
+          }
+        }
+      })
+
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(parseHttpError(errorBody) || `Jesse Agent server returned HTTP ${response.statusCode}`))
+          return
+        }
+        if (buffer.trim()) {
+          try {
+            const output = JSON.parse(buffer.trim())
+            const event = output.type === 'agent_event' ? output.event : null
+            if (event?.type === 'assistant_delta') assistantDeltaText += event.text
+            if (event?.type === 'assistant_text') assistantFinalText = event.text
+            onOutput(mapBridgeOutput(output))
+          } catch {
+            onOutput({ type: 'log', text: buffer.trim() })
+          }
+        }
+        resolve({ assistantText: assistantFinalText || assistantDeltaText })
+      })
+    })
+
+    httpRequest.on('error', error => {
+      ideServer = null
+      reject(error)
+    })
+    httpRequest.end(body)
+  })
+}
+
+function parseHttpError(body) {
+  try {
+    const value = JSON.parse(body)
+    return value.error
+  } catch {
+    return body.trim()
+  }
 }
 
 function mapBridgeOutput(output) {

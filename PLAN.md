@@ -344,7 +344,8 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Add first VS Code extension prototype after the CLI core is stable
 - [x] Add a one-shot `src/ideBridge.ts` JSONL adapter so editor clients can call the existing agent core without driving the terminal REPL
 - [x] Add commands for opening chat, asking about the current selection, and asking about the current file
-- [ ] Add full IDE patch/diff approval UI and a long-lived local agent server
+- [x] Add a long-lived local agent server for IDE clients
+- [ ] Add full IDE patch/diff approval UI
 - [x] Keep the agent core UI-agnostic
 - **Why:** Interface polish matters, but it should wrap a stable engine rather than drive the architecture.
 

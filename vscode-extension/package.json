@@ -44,7 +44,7 @@
           "type": "string",
           "enum": ["plan", "default", "acceptEdits"],
           "default": "plan",
-          "description": "Permission mode used by VS Code one-shot requests. Plan is safest for the first IDE slice."
+          "description": "Permission mode used by VS Code local server requests. Plan is safest for the first IDE slice."
         }
       }
     }
