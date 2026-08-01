@@ -25,6 +25,7 @@ import { readFileTool } from '../tools/readFile.js'
 import { runCommandTool } from '../tools/runCommand.js'
 import { writeFileTool } from '../tools/writeFile.js'
 import { taskContinueTool } from '../tools/taskContinue.js'
+import { grepCodeTool } from '../tools/grepCode.js'
 import { restoreBackgroundAgentTask } from '../tools/agent.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
 import { continueAgentTask, readTaskOutput, startAgentTask } from '../tasks.js'
@@ -388,6 +389,8 @@ async function runBackgroundAgentCrossProcessResumeEval(): Promise<EvalResult> {
 
 async function runSearchFallbackEval(): Promise<EvalResult> {
   const root = await mkdtemp(join(tmpdir(), 'jesse-eval-search-fallback-'))
+  const emptyPathDir = join(root, 'empty-path')
+  await mkdir(emptyPathDir, { recursive: true })
   await mkdir(join(root, 'src', 'tools'), { recursive: true })
   await mkdir(join(root, '.jesse', 'sessions'), { recursive: true })
   await mkdir(join(root, '.jesse', 'tool-results'), { recursive: true })
@@ -412,6 +415,14 @@ async function runSearchFallbackEval(): Promise<EvalResult> {
       maxResults: 10,
       ignoreCase: false,
     })
+    const fileMatches = await fallbackGrepCode({
+      projectRoot: realRoot,
+      searchRoot: join(realRoot, 'src', 'tools', 'taskContinue.ts'),
+      pattern: 'task_continue',
+      glob: '*.ts',
+      maxResults: 10,
+      ignoreCase: false,
+    })
     const explicitSessionMatches = await fallbackGrepCode({
       projectRoot: realRoot,
       searchRoot: join(realRoot, '.jesse', 'sessions'),
@@ -421,9 +432,30 @@ async function runSearchFallbackEval(): Promise<EvalResult> {
     })
     const rootIgnoreArgs = defaultRgIgnoreArgs('.')
     const explicitSessionIgnoreArgs = defaultRgIgnoreArgs('.jesse/sessions')
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-grep-file-fallback',
+      projectRoot: realRoot,
+      cwd: realRoot,
+      originalProjectRoot: realRoot,
+    })
+    const originalPath = process.env.PATH
+    process.env.PATH = emptyPathDir
+    let toolFileResult: string
+    try {
+      toolFileResult = await grepCodeTool.execute({
+        pattern: 'task_continue',
+        path: 'src/tools/taskContinue.ts',
+        glob: '*.ts',
+      }, context)
+    } finally {
+      process.env.PATH = originalPath
+    }
 
     check(checks, 'fallback glob found TypeScript files', files.includes('src/tools/taskContinue.ts') && files.includes('src/tools/other.ts'), files.join('\n'))
     check(checks, 'fallback grep found code match', matches.some(match => match.path === 'src/tools/taskContinue.ts'), JSON.stringify(matches))
+    check(checks, 'fallback grep supports a file search root', fileMatches.some(match => match.path === 'src/tools/taskContinue.ts'), JSON.stringify(fileMatches))
+    check(checks, 'grep_code fallback accepts file path', toolFileResult.includes('src/tools/taskContinue.ts:1:'), toolFileResult)
+    check(checks, 'grep_code fallback did not treat file path as cwd', !toolFileResult.includes('cwd 不是目录'), toolFileResult)
     check(checks, 'fallback grep ignored sessions by default', matches.every(match => !match.path.includes('.jesse/sessions')), JSON.stringify(matches))
     check(checks, 'fallback grep ignored tool results', matches.every(match => !match.path.includes('.jesse/tool-results')), JSON.stringify(matches))
     check(checks, 'explicit sessions path can still be searched', explicitSessionMatches.some(match => match.path === '.jesse/sessions/old.jsonl'), JSON.stringify(explicitSessionMatches))

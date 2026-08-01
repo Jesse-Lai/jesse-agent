@@ -66,35 +66,69 @@ export async function fallbackGrepCode(input: {
   const pattern = compilePattern(input.pattern, input.ignoreCase)
   const globMatcher = input.glob ? globToRegExp(normalizeGlob(input.glob)) : null
   const matches: GrepFallbackMatch[] = []
+
+  const rootInfo = await stat(input.searchRoot)
+  if (rootInfo.isFile()) {
+    await grepOneFile({
+      file: input.searchRoot,
+      projectRoot: input.projectRoot,
+      pattern,
+      globMatcher,
+      matches,
+      maxResults: input.maxResults,
+    })
+    return matches
+  }
+
+  if (!rootInfo.isDirectory()) return matches
+
   let visited = 0
 
   await walkFiles(input.projectRoot, input.searchRoot, async file => {
     if (visited++ >= MAX_FALLBACK_FILES) return false
-    const rel = toPosix(relative(input.projectRoot, file))
-    if (globMatcher && !globMatcher.test(rel) && !globMatcher.test(rel.split('/').pop() ?? rel)) return true
-
-    const info = await stat(file)
-    if (info.size > MAX_FALLBACK_FILE_BYTES) return true
-
-    let content: string
-    try {
-      content = await readFile(file, 'utf8')
-    } catch {
-      return true
-    }
-    if (content.includes('\0')) return true
-
-    const lines = content.split('\n')
-    for (let index = 0; index < lines.length; index++) {
-      pattern.lastIndex = 0
-      if (!pattern.test(lines[index] ?? '')) continue
-      matches.push({ path: rel, line: index + 1, text: lines[index] ?? '' })
-      if (matches.length >= input.maxResults) return false
-    }
-    return true
+    return await grepOneFile({
+      file,
+      projectRoot: input.projectRoot,
+      pattern,
+      globMatcher,
+      matches,
+      maxResults: input.maxResults,
+    })
   })
 
   return matches
+}
+
+async function grepOneFile(input: {
+  file: string
+  projectRoot: string
+  pattern: RegExp
+  globMatcher: RegExp | null
+  matches: GrepFallbackMatch[]
+  maxResults: number
+}): Promise<boolean> {
+  const rel = toPosix(relative(input.projectRoot, input.file))
+  if (input.globMatcher && !input.globMatcher.test(rel) && !input.globMatcher.test(rel.split('/').pop() ?? rel)) return true
+
+  const info = await stat(input.file)
+  if (info.size > MAX_FALLBACK_FILE_BYTES) return true
+
+  let content: string
+  try {
+    content = await readFile(input.file, 'utf8')
+  } catch {
+    return true
+  }
+  if (content.includes('\0')) return true
+
+  const lines = content.split('\n')
+  for (let index = 0; index < lines.length; index++) {
+    input.pattern.lastIndex = 0
+    if (!input.pattern.test(lines[index] ?? '')) continue
+    input.matches.push({ path: rel, line: index + 1, text: lines[index] ?? '' })
+    if (input.matches.length >= input.maxResults) return false
+  }
+  return true
 }
 
 async function walkFiles(

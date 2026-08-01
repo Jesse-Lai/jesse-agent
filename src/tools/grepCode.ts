@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
-import { resolveWorkingDirectory } from '../workingDirectory.js'
+import { isPathWithinProjectRoot, resolveToolPath, resolveWorkingDirectory } from '../workingDirectory.js'
 import { defaultRgIgnoreArgs, fallbackGrepCode } from './searchFallback.js'
 
 const execFileAsync = promisify(execFile)
@@ -109,10 +109,13 @@ async function runFallbackSearch(input: {
   ignoreCase: boolean
   context?: AgentRuntimeContext
 }): Promise<string> {
-  const cwd = await resolveWorkingDirectory(input.path, input.context)
+  if (!isPathWithinProjectRoot(input.path, input.context)) return `搜索代码失败：path 必须位于项目目录内：${input.path}`
+
+  const cwd = await resolveWorkingDirectory('.', input.context)
+  const searchRoot = resolveToolPath(input.path, input.context)
   const matches = await fallbackGrepCode({
     projectRoot: cwd.projectRoot,
-    searchRoot: cwd.absolutePath,
+    searchRoot,
     pattern: input.pattern,
     glob: input.glob || undefined,
     maxResults: input.maxResults,
