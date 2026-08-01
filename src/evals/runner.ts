@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import { Script } from 'node:vm'
 import { runAgent, type AgentEvent } from '../loop.js'
 import type { LLMStreamer, Message, ToolCall } from '../llm.js'
 import type { Tool } from '../types.js'
@@ -72,6 +73,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runSearchFallbackEval,
     runReadFileRangeEval,
     runImplementationTraceGuidanceEval,
+    runIdeTimelineUiEval,
   ]
 
   const results: EvalResult[] = []
@@ -654,6 +656,27 @@ async function runImplementationTraceGuidanceEval(): Promise<EvalResult> {
   })
 }
 
+async function runIdeTimelineUiEval(): Promise<EvalResult> {
+  return runCase('ide-timeline-ui', async checks => {
+    const source = await readFile(join(getOriginalProjectRoot(), 'vscode-extension', 'extension.js'), 'utf8')
+    const script = extractWebviewScript(source)
+
+    check(checks, 'webview script parses', parsesAsScript(script))
+    check(checks, 'timeline card exists', source.includes('.timeline-card') && source.includes('Run timeline'))
+    check(checks, 'timeline records tool events', (
+      source.includes('Tool started') &&
+      source.includes('Tool finished') &&
+      source.includes('summarizeToolAction')
+    ))
+    check(checks, 'timeline records approvals and completion', (
+      source.includes('Waiting for approval') &&
+      source.includes('Approval resolved') &&
+      source.includes('Run finished')
+    ))
+    check(checks, 'top session label hides raw session id', source.includes("sessionLabel.textContent = 'active'"))
+  })
+}
+
 async function runCase(
   name: string,
   run: (checks: EvalCheck[]) => Promise<void>,
@@ -831,6 +854,20 @@ function extractPromptSection(prompt: string, heading: string): string {
   if (start === -1) return prompt.slice(0, 1_000)
   const next = prompt.indexOf('\n# ', start + heading.length)
   return prompt.slice(start, next === -1 ? undefined : next)
+}
+
+function extractWebviewScript(source: string): string {
+  const match = /<script nonce="\$\{nonce\}">([\s\S]*?)<\/script>/.exec(source)
+  return match?.[1] ?? ''
+}
+
+function parsesAsScript(source: string): boolean {
+  try {
+    new Script(source)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function printResults(results: EvalResult[]): void {

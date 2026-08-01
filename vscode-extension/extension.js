@@ -696,6 +696,17 @@ function renderChatHtml(webview) {
     .tool-card details, .sessions-card details { margin: 0; }
     .tool-card summary, .sessions-card summary { cursor: pointer; user-select: none; font-weight: 600; }
     .tool-result { max-height: 220px; overflow: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .timeline-card { display: grid; gap: 8px; background: var(--vscode-editor-background); }
+    .timeline-title { font-weight: 600; }
+    .timeline-list { display: grid; gap: 7px; }
+    .timeline-row { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--vscode-descriptionForeground); font-size: 12px; }
+    .timeline-dot { width: 7px; height: 7px; margin-top: 5px; border-radius: 999px; background: var(--vscode-descriptionForeground); }
+    .timeline-row.running .timeline-dot, .timeline-row.thinking .timeline-dot { background: var(--vscode-textLink-foreground); }
+    .timeline-row.approval .timeline-dot { background: var(--vscode-editorWarning-foreground); }
+    .timeline-row.error .timeline-dot { background: var(--vscode-errorForeground); }
+    .timeline-row.done .timeline-dot { background: var(--vscode-gitDecoration-addedResourceForeground); }
+    .timeline-main { color: var(--vscode-foreground); }
+    .timeline-meta { margin-top: 2px; overflow-wrap: anywhere; }
     .link-button { color: var(--vscode-textLink-foreground); background: none; border: 0; padding: 0; margin: 0; cursor: pointer; font: inherit; text-align: left; }
     .link-button:hover { text-decoration: underline; background: none; }
     .session-row { display: grid; gap: 3px; padding: 8px 0; border-top: 1px solid var(--vscode-panel-border); }
@@ -763,6 +774,7 @@ function renderChatHtml(webview) {
     const runStatus = document.getElementById('run-status');
     let currentAssistant = null;
     let lastToolCard = null;
+    let currentTimeline = null;
     let isRunning = false;
 
     askButton.addEventListener('click', () => isRunning ? vscode.postMessage({ type: 'cancel' }) : ask());
@@ -789,18 +801,36 @@ function renderChatHtml(webview) {
       if (message.type === 'runState') setRunState(message.state);
       if (message.type === 'sessionLoaded') loadSession(message);
       if (message.type === 'sessions') addSessions(message.sessions || []);
-      if (message.type === 'approvalRequest') addApproval(message.request);
-      if (message.type === 'approvalSubmitted') markApproval(message.id, 'Submitted: ' + labelChoice(message.choice));
-      if (message.type === 'approvalResolved') markApproval(message.id, 'Resolved: ' + labelChoice(message.choice));
-      if (message.type === 'toolStart') addToolStart(message.name, message.args);
-      if (message.type === 'toolResult') addToolResult(message.name, message.ok, message.content);
-      if (message.type === 'status') addMessage('status', message.text);
+      if (message.type === 'approvalRequest') {
+        addTimelineEvent('approval', 'Waiting for approval', summarizeApproval(message.request));
+        addApproval(message.request);
+      }
+      if (message.type === 'approvalSubmitted') {
+        addTimelineEvent('approval', 'Approval submitted', labelChoice(message.choice));
+        markApproval(message.id, 'Submitted: ' + labelChoice(message.choice));
+      }
+      if (message.type === 'approvalResolved') {
+        addTimelineEvent(message.choice === 'reject_once' ? 'error' : 'approval', 'Approval resolved', labelChoice(message.choice));
+        markApproval(message.id, 'Resolved: ' + labelChoice(message.choice));
+      }
+      if (message.type === 'toolStart') {
+        addTimelineEvent('running', 'Tool started', summarizeToolAction(message.name, message.args));
+        addToolStart(message.name, message.args);
+      }
+      if (message.type === 'toolResult') {
+        addTimelineEvent(message.ok ? 'done' : 'error', message.ok ? 'Tool finished' : 'Tool failed', summarizeToolResult(message.name, message.ok, message.content));
+        addToolResult(message.name, message.ok, message.content);
+      }
+      if (message.type === 'status') addStatus(message.text);
       if (message.type === 'done') {
         finalizeAssistantLinks();
         updateServerState(message);
-        addMessage('status', message.text);
+        addTimelineEvent(message.cancelled ? 'error' : 'done', message.cancelled ? 'Run cancelled' : 'Run finished', message.text);
       }
-      if (message.type === 'error') addMessage('error', message.text);
+      if (message.type === 'error') {
+        addTimelineEvent('error', 'Error', message.text);
+        addMessage('error', message.text);
+      }
       if (message.type === 'log') addMessage('log', message.text);
     });
 
@@ -821,24 +851,85 @@ function renderChatHtml(webview) {
     function updateServerState(message) {
       if (message.workspaceRoot) workspaceLabel.textContent = message.workspaceRoot;
       if (message.cwd && !message.workspaceRoot) workspaceLabel.textContent = message.cwd;
-      if (message.sessionId) sessionLabel.textContent = message.sessionId + (message.messageCount ? ' · ' + message.messageCount + ' messages' : '');
+      if (message.sessionId) sessionLabel.textContent = 'active' + (message.messageCount ? ' · ' + message.messageCount + ' messages' : '');
+      if (isRunning && message.text) {
+        const meta = [message.permissionMode, message.cwd || message.workspaceRoot].filter(Boolean).join(' · ');
+        addTimelineEvent('running', 'Connected to local agent', meta || message.text);
+      }
     }
 
     function setRunState(state) {
+      const wasRunning = isRunning;
       isRunning = state === 'running';
       runStatus.textContent = isRunning ? 'running' : 'idle';
       askButton.textContent = isRunning ? 'Stop' : 'Ask';
       askButton.classList.toggle('stop', isRunning);
       prompt.disabled = isRunning;
+      if (!wasRunning && isRunning) {
+        startTimeline();
+        addTimelineEvent('running', 'Run started', 'Waiting for agent events');
+      }
     }
 
     function loadSession(message) {
       messages.textContent = '';
       currentAssistant = null;
       lastToolCard = null;
+      currentTimeline = null;
       updateServerState(message);
-      addMessage('status', message.label + ': ' + (message.sessionId || 'new session'));
+      addMessage('status', message.label + (message.messageCount ? ': ' + message.messageCount + ' messages' : ''));
       for (const item of message.messages || []) addMessage(item.role, item.content);
+    }
+
+    function addStatus(text) {
+      const turn = /^Turn (\\d+)$/.exec(String(text || ''));
+      if (turn) {
+        addTimelineEvent('thinking', 'Thinking', 'Turn ' + turn[1]);
+        return;
+      }
+      if (currentTimeline || isRunning) {
+        addTimelineEvent('running', text || 'Status update');
+        return;
+      }
+      addMessage('status', text);
+    }
+
+    function startTimeline() {
+      currentTimeline = document.createElement('div');
+      currentTimeline.className = 'msg timeline-card';
+      const title = document.createElement('div');
+      title.className = 'timeline-title';
+      title.textContent = 'Run timeline';
+      currentTimeline.appendChild(title);
+      const list = document.createElement('div');
+      list.className = 'timeline-list';
+      currentTimeline.appendChild(list);
+      messages.appendChild(currentTimeline);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function addTimelineEvent(kind, title, meta) {
+      if (!currentTimeline) startTimeline();
+      const list = currentTimeline.querySelector('.timeline-list');
+      const row = document.createElement('div');
+      row.className = 'timeline-row ' + (kind || 'status');
+      const dot = document.createElement('div');
+      dot.className = 'timeline-dot';
+      row.appendChild(dot);
+      const content = document.createElement('div');
+      const main = document.createElement('div');
+      main.className = 'timeline-main';
+      main.textContent = title || 'Event';
+      content.appendChild(main);
+      if (meta) {
+        const detail = document.createElement('div');
+        detail.className = 'timeline-meta';
+        detail.textContent = meta;
+        content.appendChild(detail);
+      }
+      row.appendChild(content);
+      list.appendChild(row);
+      window.scrollTo(0, document.body.scrollHeight);
     }
 
     function addSessions(sessions) {
@@ -870,6 +961,47 @@ function renderChatHtml(webview) {
       }
       messages.appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function summarizeApproval(request) {
+      if (!request) return '';
+      if (request.files && request.files.length) return request.files.join(', ');
+      return request.title || request.toolName || 'Tool request';
+    }
+
+    function summarizeToolAction(name, args) {
+      const input = asObject(args);
+      if (name === 'read_file') return 'Read ' + stringValue(input.path, '(missing path)');
+      if (name === 'list_files') return 'List ' + stringValue(input.path, '.');
+      if (name === 'glob_files' || name === 'glob') return 'Find files matching ' + stringValue(input.pattern, '(missing pattern)');
+      if (name === 'grep_code' || name === 'grep') return 'Search code for ' + stringValue(input.pattern, '(missing pattern)');
+      if (name === 'write_file') return 'Prepare write to ' + stringValue(input.path, '(missing path)');
+      if (name === 'edit_file') return 'Prepare edit to ' + stringValue(input.path, '(missing path)');
+      if (name === 'run_command') return 'Run ' + stringValue(input.command, '(missing command)');
+      if (name === 'run_background_command') return 'Start background command ' + stringValue(input.command, '(missing command)');
+      if (name === 'agent') return 'Sub-agent: ' + stringValue(input.description, stringValue(input.subagent_type, 'general'));
+      if (name === 'task_list') return 'List background tasks';
+      if (name === 'task_output') return 'Read task output ' + stringValue(input.task_id, '(missing task_id)');
+      if (name === 'task_continue') return 'Continue task ' + stringValue(input.task_id, '(missing task_id)');
+      if (name === 'task_stop') return 'Stop task ' + stringValue(input.task_id, '(missing task_id)');
+      if (name === 'enter_worktree') return 'Enter worktree ' + stringValue(input.name, '(auto)');
+      if (name === 'exit_worktree') return 'Exit worktree ' + stringValue(input.action, '(missing action)');
+      if (name === 'exit_plan_mode') return 'Submit plan for approval';
+      if (String(name || '').startsWith('mcp__')) return 'Call MCP tool ' + name;
+      return name + ': ' + previewJson(input);
+    }
+
+    function summarizeToolResult(name, ok, content) {
+      const size = String(content || '').length;
+      return name + ' · ' + (ok ? 'ok' : 'error') + ' · ' + size + ' chars';
+    }
+
+    function asObject(value) {
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    }
+
+    function stringValue(value, fallback) {
+      return typeof value === 'string' && value.trim() ? value : fallback;
     }
 
     function addToolStart(name, args) {
@@ -1111,7 +1243,7 @@ function renderChatHtml(webview) {
     }
 
     function cleanDiffPath(path) {
-      return String(path || '').replace(/^[ab]\\//, '').trim();
+      return String(path || '').replace(new RegExp('^[ab]/'), '').trim();
     }
 
     function approvalButton(label, choice, approvalId, extraClass) {
