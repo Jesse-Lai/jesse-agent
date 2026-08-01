@@ -427,9 +427,24 @@ function renderChatHtml(webview) {
     .approval { border-color: var(--vscode-editorWarning-foreground); background: var(--vscode-input-background); }
     .approval.resolved { border-color: var(--vscode-panel-border); opacity: 0.78; }
     .approval.resolved .approval-actions { display: none; }
-    .approval-title { font-weight: 600; margin-bottom: 8px; }
-    .approval-meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 8px; }
-    .approval-detail, .approval-diff { max-height: 280px; overflow: auto; margin: 8px 0; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .approval-title { font-weight: 600; margin-bottom: 6px; }
+    .approval-meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 10px; }
+    .approval-summary { display: inline-flex; gap: 10px; align-items: center; margin-bottom: 10px; color: var(--vscode-descriptionForeground); font-size: 12px; }
+    .approval-summary .added { color: var(--vscode-gitDecoration-addedResourceForeground); }
+    .approval-summary .deleted { color: var(--vscode-gitDecoration-deletedResourceForeground); }
+    .approval-raw { margin: 8px 0 10px; color: var(--vscode-descriptionForeground); }
+    .approval-raw summary { cursor: pointer; user-select: none; font-size: 12px; }
+    .approval-detail { max-height: 180px; overflow: auto; margin: 8px 0 0; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); color: var(--vscode-foreground); }
+    .approval-review { border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); margin: 8px 0 12px; max-height: 360px; overflow: auto; }
+    .review-file-header { padding: 7px 10px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-sideBar-background); font-size: 12px; font-weight: 600; }
+    .diff-table { width: 100%; overflow: auto; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .diff-row { display: grid; grid-template-columns: 42px 42px 18px minmax(0, 1fr); min-height: 20px; line-height: 20px; }
+    .diff-row.add { background: rgba(46, 160, 67, 0.18); }
+    .diff-row.del { background: rgba(248, 81, 73, 0.18); }
+    .diff-row.hunk { color: var(--vscode-textLink-foreground); background: var(--vscode-editor-lineHighlightBackground); }
+    .diff-row.truncated { color: var(--vscode-descriptionForeground); font-style: italic; }
+    .diff-line-no, .diff-sign { color: var(--vscode-descriptionForeground); text-align: right; padding: 0 6px; user-select: none; }
+    .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
     .approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .approval-actions button.reject { background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-button-foreground); }
     .approval-status { margin-top: 8px; color: var(--vscode-descriptionForeground); font-size: 12px; }
@@ -502,13 +517,6 @@ function renderChatHtml(webview) {
       meta.textContent = request.files && request.files.length ? 'Files: ' + request.files.join(', ') : 'Tool: ' + request.toolName;
       item.appendChild(meta);
 
-      if (request.detail) {
-        const detail = document.createElement('pre');
-        detail.className = 'approval-detail';
-        detail.textContent = request.detail;
-        item.appendChild(detail);
-      }
-
       if (request.previewError) {
         const previewError = document.createElement('div');
         previewError.className = 'error';
@@ -517,10 +525,21 @@ function renderChatHtml(webview) {
       }
 
       if (request.diff) {
-        const diff = document.createElement('pre');
-        diff.className = 'approval-diff';
-        diff.textContent = request.diff;
-        item.appendChild(diff);
+        item.appendChild(createDiffSummary(request.diff, request.files));
+        item.appendChild(createDiffReview(request.diff, request.files));
+      }
+
+      if (request.detail) {
+        const raw = document.createElement('details');
+        raw.className = 'approval-raw';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Tool request details';
+        raw.appendChild(summary);
+        const detail = document.createElement('pre');
+        detail.className = 'approval-detail';
+        detail.textContent = request.detail;
+        raw.appendChild(detail);
+        item.appendChild(raw);
       }
 
       const actions = document.createElement('div');
@@ -537,6 +556,133 @@ function renderChatHtml(webview) {
 
       messages.appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function createDiffSummary(diffText, files) {
+      const counts = countDiffLines(diffText);
+      const summary = document.createElement('div');
+      summary.className = 'approval-summary';
+      const fileCount = files && files.length ? files.length : Math.max(1, counts.files);
+      summary.appendChild(textSpan(fileCount + ' file' + (fileCount === 1 ? '' : 's')));
+      summary.appendChild(textSpan('+' + counts.added, 'added'));
+      summary.appendChild(textSpan('-' + counts.deleted, 'deleted'));
+      return summary;
+    }
+
+    function createDiffReview(diffText, files) {
+      const review = document.createElement('div');
+      review.className = 'approval-review';
+      const lines = String(diffText || '').split('\\n');
+      let currentFile = null;
+      let table = null;
+      let oldLine = 0;
+      let newLine = 0;
+      let pendingOldPath = files && files[0] ? files[0] : 'changes';
+
+      for (const line of lines) {
+        if (line.startsWith('--- ')) {
+          pendingOldPath = cleanDiffPath(line.slice(4));
+          continue;
+        }
+        if (line.startsWith('+++ ')) {
+          currentFile = cleanDiffPath(line.slice(4)) || pendingOldPath;
+          table = appendDiffFile(review, currentFile);
+          continue;
+        }
+        if (!table) table = appendDiffFile(review, currentFile || pendingOldPath);
+
+        if (line.startsWith('@@')) {
+          const hunk = parseHunkHeader(line);
+          if (hunk) {
+            oldLine = hunk.oldStart;
+            newLine = hunk.newStart;
+          }
+          appendDiffRow(table, 'hunk', '', '', '', line);
+          continue;
+        }
+
+        if (line === '... diff truncated ...' || line === '(no content changes)') {
+          appendDiffRow(table, 'truncated', '', '', '', line);
+          continue;
+        }
+
+        const prefix = line[0] || ' ';
+        const content = line.length > 0 ? line.slice(1) : '';
+        if (prefix === '+') {
+          appendDiffRow(table, 'add', '', String(newLine), '+', content);
+          newLine += 1;
+        } else if (prefix === '-') {
+          appendDiffRow(table, 'del', String(oldLine), '', '-', content);
+          oldLine += 1;
+        } else {
+          appendDiffRow(table, 'context', String(oldLine), String(newLine), '', prefix === ' ' ? content : line);
+          oldLine += 1;
+          newLine += 1;
+        }
+      }
+
+      return review;
+    }
+
+    function appendDiffFile(review, filePath) {
+      const header = document.createElement('div');
+      header.className = 'review-file-header';
+      header.textContent = filePath || 'changes';
+      review.appendChild(header);
+      const table = document.createElement('div');
+      table.className = 'diff-table';
+      review.appendChild(table);
+      return table;
+    }
+
+    function appendDiffRow(table, kind, oldNo, newNo, sign, code) {
+      const row = document.createElement('div');
+      row.className = 'diff-row ' + kind;
+      row.appendChild(lineCell(oldNo));
+      row.appendChild(lineCell(newNo));
+      const signCell = document.createElement('div');
+      signCell.className = 'diff-sign';
+      signCell.textContent = sign;
+      row.appendChild(signCell);
+      const codeCell = document.createElement('div');
+      codeCell.className = 'diff-code';
+      codeCell.textContent = code;
+      row.appendChild(codeCell);
+      table.appendChild(row);
+    }
+
+    function lineCell(text) {
+      const cell = document.createElement('div');
+      cell.className = 'diff-line-no';
+      cell.textContent = text;
+      return cell;
+    }
+
+    function textSpan(text, className) {
+      const span = document.createElement('span');
+      if (className) span.className = className;
+      span.textContent = text;
+      return span;
+    }
+
+    function countDiffLines(diffText) {
+      const counts = { files: 0, added: 0, deleted: 0 };
+      for (const line of String(diffText || '').split('\\n')) {
+        if (line.startsWith('+++ ')) counts.files += 1;
+        else if (line.startsWith('+')) counts.added += 1;
+        else if (line.startsWith('-') && !line.startsWith('--- ')) counts.deleted += 1;
+      }
+      return counts;
+    }
+
+    function parseHunkHeader(line) {
+      const match = /^@@ -(\\d+)(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@/.exec(line);
+      if (!match) return null;
+      return { oldStart: Number(match[1]), newStart: Number(match[2]) };
+    }
+
+    function cleanDiffPath(path) {
+      return String(path || '').replace(/^[ab]\\//, '').trim();
     }
 
     function approvalButton(label, choice, approvalId, extraClass) {
