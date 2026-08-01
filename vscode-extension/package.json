@@ -14,7 +14,10 @@
   "activationEvents": [
     "onCommand:jesseAgent.openChat",
     "onCommand:jesseAgent.askSelection",
-    "onCommand:jesseAgent.askCurrentFile"
+    "onCommand:jesseAgent.askCurrentFile",
+    "onCommand:jesseAgent.explainDiagnostics",
+    "onCommand:jesseAgent.fixDiagnostics",
+    "onCommand:jesseAgent.reviewChanges"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -30,6 +33,18 @@
       {
         "command": "jesseAgent.askCurrentFile",
         "title": "Jesse Agent: Ask About Current File"
+      },
+      {
+        "command": "jesseAgent.explainDiagnostics",
+        "title": "Jesse Agent: Explain Diagnostics"
+      },
+      {
+        "command": "jesseAgent.fixDiagnostics",
+        "title": "Jesse Agent: Fix Diagnostics"
+      },
+      {
+        "command": "jesseAgent.reviewChanges",
+        "title": "Jesse Agent: Review Current Changes"
       }
     ],
     "configuration": {

@@ -8,12 +8,17 @@ let chatPanel = null
 let ideServer = null
 let ideServerStartPromise = null
 let chatMessages = []
+let currentSessionId = null
+let runInProgress = false
 
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('jesseAgent.openChat', () => openChat(context)),
     vscode.commands.registerCommand('jesseAgent.askSelection', () => askSelection(context)),
     vscode.commands.registerCommand('jesseAgent.askCurrentFile', () => askCurrentFile(context)),
+    vscode.commands.registerCommand('jesseAgent.explainDiagnostics', () => explainDiagnostics(context)),
+    vscode.commands.registerCommand('jesseAgent.fixDiagnostics', () => fixDiagnostics(context)),
+    vscode.commands.registerCommand('jesseAgent.reviewChanges', () => reviewChanges(context)),
   )
 }
 
@@ -66,6 +71,48 @@ async function askCurrentFile(context) {
   await runPromptFromEditor(context, prompt, { includeSelection: false })
 }
 
+async function explainDiagnostics(context) {
+  const editor = vscode.window.activeTextEditor
+  if (!editor) {
+    vscode.window.showInformationMessage('Open a file first, then run Jesse Agent: Explain Diagnostics.')
+    return
+  }
+
+  const diagnostics = vscode.languages.getDiagnostics(editor.document.uri)
+  if (diagnostics.length === 0) {
+    vscode.window.showInformationMessage('No diagnostics in the current file.')
+    return
+  }
+
+  const panel = ensureChatPanel(context)
+  panel.reveal(vscode.ViewColumn.Beside)
+  await runPromptFromEditor(context, 'Explain the diagnostics in the current file. Identify the likely root cause and suggest the smallest safe fix. Do not edit files yet.', { includeSelection: false })
+}
+
+async function fixDiagnostics(context) {
+  const editor = vscode.window.activeTextEditor
+  if (!editor) {
+    vscode.window.showInformationMessage('Open a file first, then run Jesse Agent: Fix Diagnostics.')
+    return
+  }
+
+  const diagnostics = vscode.languages.getDiagnostics(editor.document.uri)
+  if (diagnostics.length === 0) {
+    vscode.window.showInformationMessage('No diagnostics in the current file.')
+    return
+  }
+
+  const panel = ensureChatPanel(context)
+  panel.reveal(vscode.ViewColumn.Beside)
+  await runPromptFromEditor(context, 'Fix the diagnostics in the current file. Read the relevant code first, make the smallest safe edit, then verify if a local check command is obvious.', { includeSelection: false })
+}
+
+async function reviewChanges(context) {
+  const panel = ensureChatPanel(context)
+  panel.reveal(vscode.ViewColumn.Beside)
+  await runPromptFromEditor(context, 'Review the current git changes in this workspace. Start with git status and git diff. Focus on bugs, regressions, risky assumptions, and missing tests. Do not edit files unless I explicitly ask.', { includeSelection: false })
+}
+
 function ensureChatPanel(context) {
   if (chatPanel) return chatPanel
 
@@ -76,6 +123,13 @@ function ensureChatPanel(context) {
     { enableScripts: true, retainContextWhenHidden: true },
   )
   chatPanel.webview.html = renderChatHtml(chatPanel.webview)
+  setTimeout(() => {
+    chatPanel?.webview.postMessage({
+      type: 'serverState',
+      workspaceRoot: workspaceRequest().workspaceRoot,
+      sessionId: currentSessionId,
+    })
+  }, 0)
   chatPanel.onDidDispose(() => {
     chatPanel = null
   })
@@ -88,6 +142,51 @@ function ensureChatPanel(context) {
 
     if (message?.type === 'approval') {
       await submitApproval(context, message)
+      return
+    }
+
+    if (message?.type === 'newSession') {
+      await newSession(context)
+      return
+    }
+
+    if (message?.type === 'resumeLatest') {
+      await resumeSession(context)
+      return
+    }
+
+    if (message?.type === 'showSessions') {
+      await showSessions(context)
+      return
+    }
+
+    if (message?.type === 'resumeSession') {
+      await resumeSession(context, String(message.sessionId || ''))
+      return
+    }
+
+    if (message?.type === 'compact') {
+      await compactSession(context)
+      return
+    }
+
+    if (message?.type === 'cancel') {
+      await cancelRun(context)
+      return
+    }
+
+    if (message?.type === 'showDiff') {
+      await showDiff(context)
+      return
+    }
+
+    if (message?.type === 'runEval') {
+      await runEval(context)
+      return
+    }
+
+    if (message?.type === 'openFile') {
+      await openFileFromWebview(message)
     }
   })
 
@@ -96,20 +195,27 @@ function ensureChatPanel(context) {
 
 async function runPromptFromEditor(context, prompt, options) {
   if (!prompt.trim()) return
+  if (runInProgress) {
+    chatPanel?.webview.postMessage({ type: 'error', text: 'A Jesse Agent run is already in progress. Stop it or wait for it to finish.' })
+    return
+  }
 
   const panel = ensureChatPanel(context)
   const editorContext = collectEditorContext(options)
   panel.webview.postMessage({ type: 'user', text: prompt, context: summarizeContext(editorContext) })
+  panel.webview.postMessage({ type: 'runState', state: 'running' })
+  runInProgress = true
 
   try {
     const result = await runAgentBridge(context, {
       prompt,
-      messages: chatMessages,
       context: editorContext,
       permissionMode: getPermissionMode(),
       maxTurns: 8,
+      sessionId: currentSessionId || undefined,
     }, output => {
       panel.webview.postMessage(output)
+      if (output.sessionId) currentSessionId = output.sessionId
     })
     if (result.assistantText.trim()) {
       chatMessages.push({ role: 'user', content: prompt })
@@ -118,6 +224,9 @@ async function runPromptFromEditor(context, prompt, options) {
     }
   } catch (error) {
     panel.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  } finally {
+    runInProgress = false
+    panel.webview.postMessage({ type: 'runState', state: 'idle' })
   }
 }
 
@@ -182,6 +291,121 @@ async function submitApproval(context, message) {
   } catch (error) {
     chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
   }
+}
+
+async function newSession(context) {
+  try {
+    const server = await ensureIdeServer(context)
+    const result = await postJson(server, '/session/new', workspaceRequest())
+    loadSessionIntoPanel(result, 'New chat started')
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function resumeSession(context, sessionId) {
+  try {
+    const server = await ensureIdeServer(context)
+    const result = await postJson(server, '/session/resume', { ...workspaceRequest(), sessionId: sessionId || undefined })
+    loadSessionIntoPanel(result, sessionId ? 'Session resumed' : 'Latest session resumed')
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function showSessions(context) {
+  try {
+    const server = await ensureIdeServer(context)
+    const workspaceRoot = encodeURIComponent(workspaceRequest().workspaceRoot || '')
+    const result = await getJson(server, `/sessions?limit=20&workspaceRoot=${workspaceRoot}`)
+    chatPanel?.webview.postMessage({ type: 'sessions', sessions: Array.isArray(result.sessions) ? result.sessions : [] })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function compactSession(context) {
+  try {
+    const server = await ensureIdeServer(context)
+    chatPanel?.webview.postMessage({ type: 'status', text: 'Compacting current session...' })
+    const result = await postJson(server, '/compact', workspaceRequest())
+    chatPanel?.webview.postMessage({ type: 'compactResult', result })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function cancelRun(context) {
+  try {
+    const server = await ensureIdeServer(context)
+    await postJson(server, '/cancel', {})
+    chatPanel?.webview.postMessage({ type: 'status', text: 'Cancel requested.' })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function showDiff(context) {
+  try {
+    const server = await ensureIdeServer(context)
+    const result = await postJson(server, '/diff', workspaceRequest())
+    chatPanel?.webview.postMessage({ type: 'textBlock', title: 'Current Git Diff', text: String(result.text || '') })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function runEval(context) {
+  try {
+    const server = await ensureIdeServer(context)
+    chatPanel?.webview.postMessage({ type: 'status', text: 'Running eval suite...' })
+    const result = await postJson(server, '/eval', {})
+    chatPanel?.webview.postMessage({ type: 'textBlock', title: result.ok ? 'Eval Passed' : 'Eval Failed', text: String(result.text || '') })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function openFileFromWebview(message) {
+  const filePath = String(message.filePath || '')
+  if (!filePath) return
+  const line = Number.isInteger(message.line) ? message.line : Number(message.line || 0)
+  const column = Number.isInteger(message.column) ? message.column : Number(message.column || 0)
+  const resolved = resolveWorkspacePath(filePath)
+  try {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved))
+    const editor = await vscode.window.showTextDocument(document, { preview: false })
+    if (line > 0) {
+      const position = new vscode.Position(Math.max(0, line - 1), Math.max(0, column - 1))
+      editor.selection = new vscode.Selection(position, position)
+      editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter)
+    }
+  } catch (error) {
+    vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error))
+  }
+}
+
+function loadSessionIntoPanel(result, label) {
+  currentSessionId = typeof result.sessionId === 'string' ? result.sessionId : null
+  chatMessages = Array.isArray(result.messages) ? result.messages.slice(-12) : []
+  chatPanel?.webview.postMessage({
+    type: 'sessionLoaded',
+    label,
+    sessionId: currentSessionId,
+    messageCount: result.messageCount,
+    messages: Array.isArray(result.messages) ? result.messages : [],
+    workspaceRoot: result.workspaceRoot,
+  })
+}
+
+function workspaceRequest() {
+  return { workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath }
+}
+
+function resolveWorkspacePath(filePath) {
+  if (path.isAbsolute(filePath)) return filePath
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+  return workspaceRoot ? path.join(workspaceRoot, filePath) : filePath
 }
 
 function isApprovalChoice(value) {
@@ -357,6 +581,71 @@ function postApprovalRequest(server, request) {
   })
 }
 
+function postJson(server, route, request = {}) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(request)
+    const httpRequest = http.request({
+      host: server.host,
+      port: server.port,
+      path: route,
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+    }, response => {
+      let responseBody = ''
+      response.on('data', chunk => {
+        responseBody += chunk.toString('utf8')
+      })
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(parseHttpError(responseBody) || `Jesse Agent server returned HTTP ${response.statusCode}`))
+          return
+        }
+        try {
+          resolve(responseBody.trim() ? JSON.parse(responseBody) : {})
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+
+    httpRequest.on('error', reject)
+    httpRequest.end(body)
+  })
+}
+
+function getJson(server, route) {
+  return new Promise((resolve, reject) => {
+    const httpRequest = http.request({
+      host: server.host,
+      port: server.port,
+      path: route,
+      method: 'GET',
+    }, response => {
+      let responseBody = ''
+      response.on('data', chunk => {
+        responseBody += chunk.toString('utf8')
+      })
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(parseHttpError(responseBody) || `Jesse Agent server returned HTTP ${response.statusCode}`))
+          return
+        }
+        try {
+          resolve(responseBody.trim() ? JSON.parse(responseBody) : {})
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+
+    httpRequest.on('error', reject)
+    httpRequest.end()
+  })
+}
+
 function parseHttpError(body) {
   try {
     const value = JSON.parse(body)
@@ -367,10 +656,27 @@ function parseHttpError(body) {
 }
 
 function mapBridgeOutput(output) {
-  if (output.type === 'ready') return { type: 'status', text: `Connected (${output.permissionMode})` }
+  if (output.type === 'ready') {
+    return {
+      type: 'serverState',
+      state: 'running',
+      text: `Connected (${output.permissionMode})`,
+      sessionId: output.sessionId,
+      messageCount: output.messageCount,
+      workspaceRoot: output.workspaceRoot,
+      cwd: output.cwd,
+      permissionMode: output.permissionMode,
+    }
+  }
   if (output.type === 'approval_request') return { type: 'approvalRequest', request: output.request }
   if (output.type === 'approval_response') return { type: 'approvalResolved', id: output.id, choice: output.choice }
-  if (output.type === 'done') return { type: 'done', text: `Done. Messages: ${output.messageCount}` }
+  if (output.type === 'done') return {
+    type: 'done',
+    text: `${output.cancelled ? 'Cancelled' : 'Done'}. Messages: ${output.messageCount}`,
+    sessionId: output.sessionId,
+    messageCount: output.messageCount,
+    cancelled: output.cancelled === true,
+  }
   if (output.type === 'error') return { type: 'error', text: output.error }
   if (output.type !== 'agent_event') return { type: 'log', text: JSON.stringify(output) }
 
@@ -378,11 +684,23 @@ function mapBridgeOutput(output) {
   if (event.type === 'assistant_delta') return { type: 'assistantDelta', text: event.text }
   if (event.type === 'assistant_text') return { type: 'assistantText', text: event.text }
   if (event.type === 'turn_start') return { type: 'status', text: `Turn ${event.turn}` }
-  if (event.type === 'tool_start') return { type: 'tool', text: `Tool: ${event.name}` }
-  if (event.type === 'tool_result') return { type: 'tool', text: `Tool result: ${event.name} ${event.ok ? 'ok' : 'error'} (${event.content.length} chars)` }
+  if (event.type === 'tool_start') return { type: 'toolStart', name: event.name, args: event.args }
+  if (event.type === 'tool_result') return { type: 'toolResult', name: event.name, ok: event.ok, content: event.content }
   if (event.type === 'max_turns') return { type: 'error', text: 'Reached max turns.' }
-  if (event.type === 'error') return { type: 'error', text: event.reason }
+  if (event.type === 'error') {
+    const text = normalizeAgentError(event.reason)
+    return isAbortLikeError(text) ? { type: 'status', text } : { type: 'error', text }
+  }
   return { type: 'log', text: JSON.stringify(event) }
+}
+
+function normalizeAgentError(reason) {
+  return isAbortLikeError(reason) ? 'Run cancelled by user.' : String(reason || 'Unknown agent error')
+}
+
+function isAbortLikeError(reason) {
+  const normalized = String(reason || '').toLowerCase()
+  return normalized.includes('cancelled') || normalized.includes('canceled') || normalized.includes('aborted')
 }
 
 function resolveAgentRoot(context) {
@@ -418,11 +736,24 @@ function renderChatHtml(webview) {
   <title>Jesse Agent</title>
   <style>
     body { margin: 0; padding: 16px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-    .messages { display: flex; flex-direction: column; gap: 12px; padding-bottom: 96px; }
+    .toolbar { position: sticky; top: 0; z-index: 2; display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: 10px; background: var(--vscode-editor-background); border-bottom: 1px solid var(--vscode-panel-border); }
+    .toolbar button, .composer-actions button { margin-top: 0; padding: 5px 9px; }
+    .workspace-strip { display: grid; gap: 3px; margin: 10px 0 12px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+    .workspace-strip strong { color: var(--vscode-foreground); font-weight: 600; }
+    .messages { display: flex; flex-direction: column; gap: 12px; padding-bottom: 118px; }
     .msg { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .user { background: var(--vscode-input-background); }
     .assistant { background: var(--vscode-editor-inactiveSelectionBackground); }
     .tool, .status, .error, .log { font-size: 12px; color: var(--vscode-descriptionForeground); }
+    .tool-card details, .sessions-card details { margin: 0; }
+    .tool-card summary, .sessions-card summary { cursor: pointer; user-select: none; font-weight: 600; }
+    .tool-result { max-height: 220px; overflow: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .text-block { max-height: 360px; overflow: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .link-button { color: var(--vscode-textLink-foreground); background: none; border: 0; padding: 0; margin: 0; cursor: pointer; font: inherit; text-align: left; }
+    .link-button:hover { text-decoration: underline; background: none; }
+    .session-row { display: grid; gap: 3px; padding: 8px 0; border-top: 1px solid var(--vscode-panel-border); }
+    .session-row:first-of-type { border-top: 0; }
+    .session-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
     .error { color: var(--vscode-errorForeground); }
     .approval { border-color: var(--vscode-editorWarning-foreground); background: var(--vscode-input-background); }
     .approval.resolved { border-color: var(--vscode-panel-border); opacity: 0.78; }
@@ -453,22 +784,51 @@ function renderChatHtml(webview) {
     button { margin-top: 8px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: none; padding: 6px 12px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
     button:disabled { opacity: 0.65; cursor: default; }
+    .composer-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .composer-actions .stop { background: var(--vscode-inputValidation-errorBackground); }
     .context { margin-top: 6px; color: var(--vscode-descriptionForeground); font-size: 11px; }
   </style>
 </head>
 <body>
+  <div class="toolbar">
+    <button id="new-chat">New Chat</button>
+    <button id="resume-latest">Resume Latest</button>
+    <button id="sessions">Sessions</button>
+    <button id="compact">Compact</button>
+    <button id="diff">Diff</button>
+    <button id="eval">Eval</button>
+  </div>
+  <div class="workspace-strip">
+    <div><strong>Workspace</strong>: <span id="workspace">detecting...</span></div>
+    <div><strong>Session</strong>: <span id="session">none</span> · <strong>Status</strong>: <span id="run-status">idle</span></div>
+  </div>
   <div id="messages" class="messages"></div>
   <div class="composer">
     <textarea id="prompt" placeholder="Ask Jesse Agent about the current file or selection..."></textarea>
-    <button id="ask">Ask</button>
+    <div class="composer-actions">
+      <button id="ask">Ask</button>
+      <button id="stop" class="stop" disabled>Stop</button>
+    </div>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const messages = document.getElementById('messages');
     const prompt = document.getElementById('prompt');
+    const workspaceLabel = document.getElementById('workspace');
+    const sessionLabel = document.getElementById('session');
+    const runStatus = document.getElementById('run-status');
+    const stopButton = document.getElementById('stop');
     let currentAssistant = null;
+    let lastToolCard = null;
 
     document.getElementById('ask').addEventListener('click', () => ask());
+    document.getElementById('new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
+    document.getElementById('resume-latest').addEventListener('click', () => vscode.postMessage({ type: 'resumeLatest' }));
+    document.getElementById('sessions').addEventListener('click', () => vscode.postMessage({ type: 'showSessions' }));
+    document.getElementById('compact').addEventListener('click', () => vscode.postMessage({ type: 'compact' }));
+    document.getElementById('diff').addEventListener('click', () => vscode.postMessage({ type: 'showDiff' }));
+    document.getElementById('eval').addEventListener('click', () => vscode.postMessage({ type: 'runEval' }));
+    stopButton.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
     prompt.addEventListener('keydown', event => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) ask();
     });
@@ -486,12 +846,23 @@ function renderChatHtml(webview) {
       if (message.type === 'user') addMessage('user', message.text, message.context);
       if (message.type === 'assistantDelta') appendAssistant(message.text);
       if (message.type === 'assistantText' && !currentAssistant) addMessage('assistant', message.text);
+      if (message.type === 'serverState') updateServerState(message);
+      if (message.type === 'runState') setRunState(message.state);
+      if (message.type === 'sessionLoaded') loadSession(message);
+      if (message.type === 'sessions') addSessions(message.sessions || []);
+      if (message.type === 'compactResult') addCompactResult(message.result || {});
+      if (message.type === 'textBlock') addTextBlock(message.title, message.text);
       if (message.type === 'approvalRequest') addApproval(message.request);
       if (message.type === 'approvalSubmitted') markApproval(message.id, 'Submitted: ' + labelChoice(message.choice));
       if (message.type === 'approvalResolved') markApproval(message.id, 'Resolved: ' + labelChoice(message.choice));
-      if (message.type === 'tool') addMessage('tool', message.text);
+      if (message.type === 'toolStart') addToolStart(message.name, message.args);
+      if (message.type === 'toolResult') addToolResult(message.name, message.ok, message.content);
       if (message.type === 'status') addMessage('status', message.text);
-      if (message.type === 'done') addMessage('status', message.text);
+      if (message.type === 'done') {
+        finalizeAssistantLinks();
+        updateServerState(message);
+        addMessage('status', message.text);
+      }
       if (message.type === 'error') addMessage('error', message.text);
       if (message.type === 'log') addMessage('log', message.text);
     });
@@ -499,6 +870,118 @@ function renderChatHtml(webview) {
     function appendAssistant(text) {
       if (!currentAssistant) currentAssistant = addMessage('assistant', '');
       currentAssistant.firstChild.textContent += text;
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function finalizeAssistantLinks() {
+      const body = currentAssistant?.firstChild;
+      if (!body) return;
+      const text = body.textContent || '';
+      body.textContent = '';
+      renderLinkedText(body, text);
+    }
+
+    function updateServerState(message) {
+      if (message.workspaceRoot) workspaceLabel.textContent = message.workspaceRoot;
+      if (message.cwd && !message.workspaceRoot) workspaceLabel.textContent = message.cwd;
+      if (message.sessionId) sessionLabel.textContent = message.sessionId + (message.messageCount ? ' · ' + message.messageCount + ' messages' : '');
+    }
+
+    function setRunState(state) {
+      runStatus.textContent = state === 'running' ? 'running' : 'idle';
+      stopButton.disabled = state !== 'running';
+    }
+
+    function loadSession(message) {
+      messages.textContent = '';
+      currentAssistant = null;
+      lastToolCard = null;
+      updateServerState(message);
+      addMessage('status', message.label + ': ' + (message.sessionId || 'new session'));
+      for (const item of message.messages || []) addMessage(item.role, item.content);
+    }
+
+    function addSessions(sessions) {
+      const item = document.createElement('div');
+      item.className = 'msg sessions-card';
+      const title = document.createElement('div');
+      title.className = 'approval-title';
+      title.textContent = sessions.length ? 'Recent Sessions' : 'No sessions found';
+      item.appendChild(title);
+      for (const session of sessions) {
+        const row = document.createElement('div');
+        row.className = 'session-row';
+        const button = document.createElement('button');
+        button.className = 'link-button';
+        button.textContent = session.id || '(unknown session)';
+        button.addEventListener('click', () => vscode.postMessage({ type: 'resumeSession', sessionId: session.id }));
+        row.appendChild(button);
+        const meta = document.createElement('div');
+        meta.className = 'session-meta';
+        meta.textContent = [session.updatedAt, (session.messageCount || 0) + ' messages'].filter(Boolean).join(' · ');
+        row.appendChild(meta);
+        if (session.lastUserMessage) {
+          const last = document.createElement('div');
+          last.textContent = session.lastUserMessage;
+          row.appendChild(last);
+        }
+        item.appendChild(row);
+      }
+      messages.appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function addCompactResult(result) {
+      if (!result.compacted) {
+        addMessage('status', 'Compact skipped: ' + (result.reason || 'not enough history'));
+        return;
+      }
+      addMessage('status', 'Compacted ' + result.compactedMessageCount + ' old messages. Messages: ' + result.beforeMessageCount + ' -> ' + result.afterMessageCount + '. Context chars: ' + result.contextChars);
+    }
+
+    function addTextBlock(title, text) {
+      const item = document.createElement('div');
+      item.className = 'msg log';
+      const heading = document.createElement('div');
+      heading.className = 'approval-title';
+      heading.textContent = title || 'Output';
+      item.appendChild(heading);
+      const block = document.createElement('pre');
+      block.className = 'text-block';
+      block.textContent = text || '';
+      item.appendChild(block);
+      messages.appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function addToolStart(name, args) {
+      const item = document.createElement('div');
+      item.className = 'msg tool tool-card';
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Tool: ' + name;
+      details.appendChild(summary);
+      const input = document.createElement('pre');
+      input.className = 'tool-result';
+      input.textContent = previewJson(args);
+      details.appendChild(input);
+      item.appendChild(details);
+      messages.appendChild(item);
+      lastToolCard = { name, details };
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function addToolResult(name, ok, content) {
+      const target = lastToolCard && lastToolCard.name === name ? lastToolCard.details : null;
+      if (!target) {
+        addMessage('tool', 'Tool result: ' + name + ' ' + (ok ? 'ok' : 'error') + ' (' + String(content || '').length + ' chars)');
+        return;
+      }
+      const result = document.createElement('pre');
+      result.className = 'tool-result';
+      result.textContent = (ok ? 'ok' : 'error') + '\\n' + previewText(content || '', 1200);
+      target.appendChild(result);
+      target.querySelector('summary').textContent = 'Tool: ' + name + ' · ' + (ok ? 'ok' : 'error') + ' · ' + String(content || '').length + ' chars';
       window.scrollTo(0, document.body.scrollHeight);
     }
 
@@ -522,6 +1005,10 @@ function renderChatHtml(webview) {
         previewError.className = 'error';
         previewError.textContent = 'Preview warning: ' + request.previewError;
         item.appendChild(previewError);
+      }
+
+      if (!request.diff && request.args && request.args.command) {
+        item.appendChild(createCommandReview(request.args));
       }
 
       if (request.diff) {
@@ -627,12 +1114,36 @@ function renderChatHtml(webview) {
     function appendDiffFile(review, filePath) {
       const header = document.createElement('div');
       header.className = 'review-file-header';
-      header.textContent = filePath || 'changes';
+      const button = document.createElement('button');
+      button.className = 'link-button';
+      button.textContent = filePath || 'changes';
+      button.addEventListener('click', () => vscode.postMessage({ type: 'openFile', filePath }));
+      header.appendChild(button);
       review.appendChild(header);
       const table = document.createElement('div');
       table.className = 'diff-table';
       review.appendChild(table);
       return table;
+    }
+
+    function createCommandReview(args) {
+      const block = document.createElement('div');
+      block.className = 'approval-review';
+      const header = document.createElement('div');
+      header.className = 'review-file-header';
+      header.textContent = 'Shell command';
+      block.appendChild(header);
+      const command = document.createElement('pre');
+      command.className = 'tool-result';
+      command.textContent = String(args.command || '');
+      block.appendChild(command);
+      if (args.cwd) {
+        const cwd = document.createElement('div');
+        cwd.className = 'approval-meta';
+        cwd.textContent = 'cwd: ' + args.cwd;
+        block.appendChild(cwd);
+      }
+      return block;
     }
 
     function appendDiffRow(table, kind, oldNo, newNo, sign, code) {
@@ -723,7 +1234,7 @@ function renderChatHtml(webview) {
       const item = document.createElement('div');
       item.className = 'msg ' + kind;
       const body = document.createElement('div');
-      body.textContent = text;
+      renderLinkedText(body, text || '');
       item.appendChild(body);
       if (context) {
         const meta = document.createElement('div');
@@ -734,6 +1245,38 @@ function renderChatHtml(webview) {
       messages.appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
       return item;
+    }
+
+    function renderLinkedText(container, text) {
+      const pattern = new RegExp('((?:\\\\/|\\\\.\\\\/|\\\\.\\\\.\\\\/)?[A-Za-z0-9_@.\\\\/-]+\\\\.(?:ts|tsx|js|jsx|json|md|css|html|py|sh|yml|yaml))(?:[:#](\\\\d+))?', 'g');
+      let lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        if (match.index > lastIndex) container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        const filePath = match[1];
+        const line = match[2] ? Number(match[2]) : undefined;
+        const button = document.createElement('button');
+        button.className = 'link-button';
+        button.textContent = match[0];
+        button.addEventListener('click', () => vscode.postMessage({ type: 'openFile', filePath, line }));
+        container.appendChild(button);
+        lastIndex = pattern.lastIndex;
+      }
+      if (lastIndex < text.length) container.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+
+    function previewJson(value) {
+      try {
+        return previewText(JSON.stringify(value, null, 2), 1400);
+      } catch {
+        return String(value);
+      }
+    }
+
+    function previewText(value, maxChars) {
+      const text = String(value || '');
+      if (text.length <= maxChars) return text;
+      return text.slice(0, maxChars) + '... (' + text.length + ' chars total)';
     }
   </script>
 </body>

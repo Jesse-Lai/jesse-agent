@@ -23,6 +23,7 @@ export interface IdeBridgeRequest {
   context?: IdeBridgeContext
   permissionMode?: PermissionMode
   maxTurns?: number
+  sessionId?: string
 }
 
 export interface IdeBridgeMessage {
@@ -43,11 +44,11 @@ export interface IdeApprovalRequest extends ToolApprovalRequest {
 }
 
 export type IdeBridgeOutput =
-  | { type: 'ready'; workspaceRoot?: string; permissionMode: PermissionMode }
+  | { type: 'ready'; workspaceRoot?: string; cwd?: string; sessionId?: string; messageCount?: number; permissionMode: PermissionMode }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'approval_request'; request: IdeApprovalRequest }
   | { type: 'approval_response'; id: string; choice: ConfirmChoice }
-  | { type: 'done'; messageCount: number }
+  | { type: 'done'; sessionId?: string; messageCount: number; cancelled?: boolean }
   | { type: 'error'; error: string }
 
 export async function buildIdeMessages(
@@ -100,10 +101,11 @@ export function parseIdeRequest(value: unknown): IdeBridgeRequest {
     context: typeof object.context === 'object' && object.context ? object.context as IdeBridgeContext : undefined,
     permissionMode: parsedPermissionMode ?? undefined,
     maxTurns: object.maxTurns,
+    sessionId: typeof object.sessionId === 'string' ? object.sessionId : undefined,
   }
 }
 
-function formatIdePrompt(prompt: string, context?: IdeBridgeContext): string {
+export function formatIdePrompt(prompt: string, context?: IdeBridgeContext): string {
   const ideContext = context ?? {}
   const sections = ['# User Request', prompt]
 
