@@ -76,6 +76,16 @@ function toolsSection(): string {
 - 如果一次要调用多个相互独立的工具（彼此不依赖对方的结果），可以在一条回复里并行发起，提高效率；有先后依赖的调用则按顺序来。`
 }
 
+/** ⑥ 实现追踪：查清一个能力从入口到落盘/边界的路径。 */
+function implementationTraceSection(): string {
+  return `# 实现追踪
+- 当用户问“某能力在哪里实现”“调用链是什么”“怎么跨进程/跨 session 恢复”“为什么这样工作”时，目标是追出实现路径，而不是泛泛搜索关键词。
+- 先用 grep_code / glob_files 定位少量候选入口；找到明显关键文件后，优先 read_file 阅读关键片段，再沿 import、函数调用、类型名继续追踪。
+- 对这类问题，最终回答尽量按固定结构给出：入口文件、核心函数调用链、持久化/状态文件、限制或边界。
+- 默认不要搜索 .jesse/sessions、.jesse/tool-results、.jesse/task-output、.git、node_modules 或构建产物；除非用户明确询问历史记录、工具结果、后台任务输出或生成产物。
+- 连续两次搜索没有带来新文件或新函数时，停止继续泛搜，改为总结已有证据并说明不确定点。`
+}
+
 /** ⑥ Sub-agents：隔离上下文的专业 worker。对应 Claude Code 的 AgentTool。 */
 function subAgentsSection(): string {
   return `# Sub-agents
@@ -266,6 +276,7 @@ export function buildSystemPrompt(
     doingTasksSection(),
     actionsSection(),
     toolsSection(),
+    implementationTraceSection(),
     subAgentsSection(),
     gitAndVerificationSection(),
     worktreeSection(),

@@ -29,7 +29,8 @@ import { restoreBackgroundAgentTask } from '../tools/agent.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
 import { continueAgentTask, readTaskOutput, startAgentTask } from '../tasks.js'
 import { createAgentRuntimeContext } from '../runtimeContext.js'
-import { fallbackGlobFiles, fallbackGrepCode } from '../tools/searchFallback.js'
+import { buildSystemPrompt } from '../prompt.js'
+import { defaultRgIgnoreArgs, fallbackGlobFiles, fallbackGrepCode } from '../tools/searchFallback.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
 const execFileAsync = promisify(execFile)
@@ -65,6 +66,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runBackgroundAgentCrossProcessResumeEval,
     runSearchFallbackEval,
     runReadFileRangeEval,
+    runImplementationTraceGuidanceEval,
   ]
 
   const results: EvalResult[] = []
@@ -387,9 +389,11 @@ async function runBackgroundAgentCrossProcessResumeEval(): Promise<EvalResult> {
 async function runSearchFallbackEval(): Promise<EvalResult> {
   const root = await mkdtemp(join(tmpdir(), 'jesse-eval-search-fallback-'))
   await mkdir(join(root, 'src', 'tools'), { recursive: true })
+  await mkdir(join(root, '.jesse', 'sessions'), { recursive: true })
   await mkdir(join(root, '.jesse', 'tool-results'), { recursive: true })
   await writeFile(join(root, 'src', 'tools', 'taskContinue.ts'), 'export const task_continue = true\n', 'utf8')
   await writeFile(join(root, 'src', 'tools', 'other.ts'), 'export const other = false\n', 'utf8')
+  await writeFile(join(root, '.jesse', 'sessions', 'old.jsonl'), 'task_continue should be ignored here\n', 'utf8')
   await writeFile(join(root, '.jesse', 'tool-results', 'old.txt'), 'task_continue should be ignored here\n', 'utf8')
   const realRoot = await realpath(root)
 
@@ -408,10 +412,23 @@ async function runSearchFallbackEval(): Promise<EvalResult> {
       maxResults: 10,
       ignoreCase: false,
     })
+    const explicitSessionMatches = await fallbackGrepCode({
+      projectRoot: realRoot,
+      searchRoot: join(realRoot, '.jesse', 'sessions'),
+      pattern: 'task_continue',
+      maxResults: 10,
+      ignoreCase: false,
+    })
+    const rootIgnoreArgs = defaultRgIgnoreArgs('.')
+    const explicitSessionIgnoreArgs = defaultRgIgnoreArgs('.jesse/sessions')
 
     check(checks, 'fallback glob found TypeScript files', files.includes('src/tools/taskContinue.ts') && files.includes('src/tools/other.ts'), files.join('\n'))
     check(checks, 'fallback grep found code match', matches.some(match => match.path === 'src/tools/taskContinue.ts'), JSON.stringify(matches))
+    check(checks, 'fallback grep ignored sessions by default', matches.every(match => !match.path.includes('.jesse/sessions')), JSON.stringify(matches))
     check(checks, 'fallback grep ignored tool results', matches.every(match => !match.path.includes('.jesse/tool-results')), JSON.stringify(matches))
+    check(checks, 'explicit sessions path can still be searched', explicitSessionMatches.some(match => match.path === '.jesse/sessions/old.jsonl'), JSON.stringify(explicitSessionMatches))
+    check(checks, 'rg default ignores include sessions', rootIgnoreArgs.includes('!.jesse/sessions/**'), rootIgnoreArgs.join(' '))
+    check(checks, 'explicit rg sessions search is not ignored', !explicitSessionIgnoreArgs.includes('!.jesse/sessions/**'), explicitSessionIgnoreArgs.join(' '))
   }, root)
 }
 
@@ -437,6 +454,26 @@ async function runReadFileRangeEval(): Promise<EvalResult> {
     check(checks, 'range includes requested lines', result.includes('two\nthree'), result)
     check(checks, 'range excludes outside lines', !result.includes('one') && !result.includes('four'), result)
   }, root)
+}
+
+async function runImplementationTraceGuidanceEval(): Promise<EvalResult> {
+  return runCase('implementation-trace-guidance', async checks => {
+    const prompt = buildSystemPrompt(null, null, null, null)
+
+    check(checks, 'prompt has implementation trace section', prompt.includes('# 实现追踪'))
+    check(checks, 'trace guidance asks for implementation path output shape', (
+      prompt.includes('入口文件') &&
+      prompt.includes('核心函数调用链') &&
+      prompt.includes('持久化/状态文件') &&
+      prompt.includes('限制或边界')
+    ), extractPromptSection(prompt, '# 实现追踪'))
+    check(checks, 'trace guidance discourages searching transcripts by default', (
+      prompt.includes('默认不要搜索 .jesse/sessions') &&
+      prompt.includes('.jesse/tool-results') &&
+      prompt.includes('.jesse/task-output')
+    ), extractPromptSection(prompt, '# 实现追踪'))
+    check(checks, 'trace guidance has convergence rule', prompt.includes('连续两次搜索没有带来新文件或新函数时'), extractPromptSection(prompt, '# 实现追踪'))
+  })
 }
 
 async function runCase(
@@ -609,6 +646,13 @@ function finalText(events: AgentEvent[]): string {
   return events
     .flatMap(event => event.type === 'assistant_text' ? [event.text] : [])
     .join('\n')
+}
+
+function extractPromptSection(prompt: string, heading: string): string {
+  const start = prompt.indexOf(heading)
+  if (start === -1) return prompt.slice(0, 1_000)
+  const next = prompt.indexOf('\n# ', start + heading.length)
+  return prompt.slice(start, next === -1 ? undefined : next)
 }
 
 function printResults(results: EvalResult[]): void {

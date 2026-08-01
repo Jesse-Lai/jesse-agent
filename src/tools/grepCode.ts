@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { resolveWorkingDirectory } from '../workingDirectory.js'
-import { fallbackGrepCode } from './searchFallback.js'
+import { defaultRgIgnoreArgs, fallbackGrepCode } from './searchFallback.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -58,6 +58,7 @@ export const grepCodeTool: Tool = {
     ]
     if (ignoreCase) rgArgs.push('--ignore-case')
     if (glob) rgArgs.push('--glob', glob)
+    rgArgs.push(...defaultRgIgnoreArgs(path))
     rgArgs.push(pattern, path)
 
     try {

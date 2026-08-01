@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
 import { resolveWorkingDirectory } from '../workingDirectory.js'
-import { fallbackGlobFiles } from './searchFallback.js'
+import { defaultRgIgnoreArgs, fallbackGlobFiles } from './searchFallback.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -49,7 +49,7 @@ export const globFilesTool: Tool = {
       const cwd = await resolveWorkingDirectory('.', context)
       const { stdout } = await execFileAsync(
         'rg',
-        ['--files', '--glob', pattern, path],
+        ['--files', '--glob', pattern, ...defaultRgIgnoreArgs(path), path],
         { cwd: cwd.absolutePath, timeout: RG_TIMEOUT_MS, maxBuffer: RG_MAX_BUFFER },
       )
 

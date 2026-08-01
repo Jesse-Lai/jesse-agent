@@ -15,3 +15,4 @@ Memory body.
 
 ## Index
 
+- [Teaching suggestion format](teaching-suggestion-format.md) — Include Claude Code comparisons in recommendations and next-step plans after completed work.

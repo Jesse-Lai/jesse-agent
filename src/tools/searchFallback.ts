@@ -8,7 +8,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
 
-const DEFAULT_IGNORED_DIRS = new Set([
+export const DEFAULT_SEARCH_IGNORED_DIRS = [
   '.git',
   'node_modules',
   'dist',
@@ -16,10 +16,13 @@ const DEFAULT_IGNORED_DIRS = new Set([
   'coverage',
   '.next',
   '.turbo',
+  '.jesse/sessions',
   '.jesse/tool-results',
   '.jesse/task-output',
   '.jesse/worktrees',
-])
+] as const
+
+const DEFAULT_IGNORED_DIRS = new Set<string>(DEFAULT_SEARCH_IGNORED_DIRS)
 
 const MAX_FALLBACK_FILE_BYTES = 1_000_000
 const MAX_FALLBACK_FILES = 20_000
@@ -125,6 +128,24 @@ async function walkFiles(
 function shouldSkipDirectory(relativePath: string, basename: string): boolean {
   if (DEFAULT_IGNORED_DIRS.has(basename) || DEFAULT_IGNORED_DIRS.has(relativePath)) return true
   return Array.from(DEFAULT_IGNORED_DIRS).some(dir => relativePath.startsWith(`${dir}/`))
+}
+
+export function defaultRgIgnoreArgs(searchPath: string): string[] {
+  return DEFAULT_SEARCH_IGNORED_DIRS
+    .filter(dir => !isExplicitlySearchingIgnoredPath(searchPath, dir))
+    .flatMap(dir => ['--glob', `!${dir}/**`])
+}
+
+function isExplicitlySearchingIgnoredPath(searchPath: string, ignoredDir: string): boolean {
+  const normalized = normalizeSearchPath(searchPath)
+  return normalized === ignoredDir || normalized.startsWith(`${ignoredDir}/`)
+}
+
+function normalizeSearchPath(path: string): string {
+  let normalized = toPosix(path.trim() || '.')
+  while (normalized.startsWith('./')) normalized = normalized.slice(2)
+  while (normalized.endsWith('/') && normalized !== '/') normalized = normalized.slice(0, -1)
+  return normalized || '.'
 }
 
 function compilePattern(pattern: string, ignoreCase: boolean): RegExp {
