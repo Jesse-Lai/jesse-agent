@@ -18,7 +18,7 @@ import { getProjectRoot, setProjectRoot } from './workingDirectory.js'
 import { setPermissionMode } from './permissionMode.js'
 import { createAgentRuntimeContext } from './runtimeContext.js'
 import { compactMessages } from './compaction.js'
-import { estimateContextChars } from './contextBudget.js'
+import { CONTEXT_WARN_CHARS, estimateContextChars } from './contextBudget.js'
 import { formatGitDiff } from './gitDiff.js'
 import { listSessionSummaries, openSession, type SessionTranscript } from './session.js'
 import {
@@ -40,6 +40,7 @@ const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 0
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const AGENT_ROOT = process.cwd()
+const IDE_AUTO_COMPACT_CHARS = numberFromEnv('IDE_AUTO_COMPACT_CHARS', CONTEXT_WARN_CHARS)
 const execFileAsync = promisify(execFile)
 
 interface PendingApproval {
@@ -200,6 +201,7 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
 
   session.messages.push({ role: 'user', content: formatIdePrompt(prompt, request.context) })
   session.persistedMessageCount = await recordNewMessages(session.transcript, session.messages, session.persistedMessageCount)
+  await autoCompactSessionIfNeeded(session)
 
   res.writeHead(200, {
     'content-type': 'application/x-ndjson; charset=utf-8',
@@ -253,6 +255,26 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
 
   writeJsonl(res, { type: 'done', sessionId: session.transcript.id, messageCount: session.messages.length, cancelled })
   res.end()
+}
+
+async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<void> {
+  const chars = estimateContextChars(session.messages)
+  if (chars < IDE_AUTO_COMPACT_CHARS) return
+
+  const result = await compactMessages(session.messages)
+  if (!result.compacted) return
+
+  await session.transcript.appendCompactBoundary({
+    beforeMessageCount: result.beforeMessageCount,
+    afterMessageCount: result.afterMessageCount,
+    compactedMessageCount: result.compactedMessageCount,
+    keptRecentMessages: result.keptRecentMessages,
+    summary: result.summary,
+    messages: result.messages,
+  })
+  session.messages.splice(0, session.messages.length, ...result.messages)
+  await refreshSessionSystemPrompt(session.messages)
+  session.persistedMessageCount = session.messages.length
 }
 
 async function activateWorkspace(path: string | undefined): Promise<string> {
@@ -547,6 +569,13 @@ function normalizePort(value: string | undefined): number {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) return DEFAULT_PORT
   return parsed
+}
+
+function numberFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
 interface ExecError extends Error {

@@ -125,6 +125,7 @@ export interface OpenedSession {
 
 export interface SessionSummary {
   id: string
+  title: string
   filePath: string
   updatedAt: string
   messageCount: number
@@ -313,7 +314,7 @@ async function summarizeSession(filePath: string): Promise<SessionSummary | null
       messageCount += 1
       if (record.message.role === 'user') {
         userMessageCount += 1
-        lastUserMessage = record.message.content ?? null
+        lastUserMessage = displayUserMessage(record.message.content) ?? lastUserMessage
       }
     }
 
@@ -321,8 +322,10 @@ async function summarizeSession(filePath: string): Promise<SessionSummary | null
       compacted = true
       messageCount = record.messages.length
       userMessageCount = record.messages.filter(message => message.role === 'user').length
-      const lastUser = [...record.messages].reverse().find(message => message.role === 'user')
-      lastUserMessage = lastUser?.content ?? lastUserMessage
+      const lastUser = [...record.messages]
+        .reverse()
+        .find(message => message.role === 'user' && displayUserMessage(message.content))
+      lastUserMessage = displayUserMessage(lastUser?.content) ?? lastUserMessage
     }
 
     if (record.type === 'worktree_event') {
@@ -332,6 +335,7 @@ async function summarizeSession(filePath: string): Promise<SessionSummary | null
 
   return {
     id: sessionIdFromPath(filePath),
+    title: titleFromUserMessage(lastUserMessage),
     filePath,
     updatedAt,
     messageCount,
@@ -346,6 +350,39 @@ function previewLine(text: string, maxChars: number): string {
   const normalized = text.replace(/\s+/g, ' ').trim()
   if (normalized.length <= maxChars) return normalized
   return `${normalized.slice(0, maxChars)}...`
+}
+
+function displayUserMessage(content: string | null | undefined): string | null {
+  if (!content?.trim()) return null
+  if (content.startsWith('[Compacted conversation summary]')) return null
+
+  const userRequest = '# User Request\n'
+  if (content.startsWith(userRequest)) {
+    const start = userRequest.length
+    const contextStart = content.indexOf('\n# IDE Context', start)
+    return previewLine(content.slice(start, contextStart === -1 ? undefined : contextStart), 120)
+  }
+
+  return previewLine(content, 120)
+}
+
+function titleFromUserMessage(message: string | null): string {
+  if (!message) return 'Untitled session'
+
+  let title = message
+    .replace(/^请|^帮我|^帮我一下|^你能不能|^可以帮我/g, '')
+    .replace(/请必须.*$/g, '')
+    .replace(/，?并解释.*$/g, '')
+    .replace(/，?以及.*$/g, '')
+    .replace(/，?然后.*$/g, '')
+    .replace(/。.*$/g, '')
+    .replace(/\?.*$/g, '')
+    .replace(/？.*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!title) title = message.replace(/\s+/g, ' ').trim()
+  return previewLine(title, 42)
 }
 
 function formatLocalTime(iso: string): string {

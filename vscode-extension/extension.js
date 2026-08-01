@@ -150,11 +150,6 @@ function ensureChatPanel(context) {
       return
     }
 
-    if (message?.type === 'resumeLatest') {
-      await resumeSession(context)
-      return
-    }
-
     if (message?.type === 'showSessions') {
       await showSessions(context)
       return
@@ -165,23 +160,8 @@ function ensureChatPanel(context) {
       return
     }
 
-    if (message?.type === 'compact') {
-      await compactSession(context)
-      return
-    }
-
     if (message?.type === 'cancel') {
       await cancelRun(context)
-      return
-    }
-
-    if (message?.type === 'showDiff') {
-      await showDiff(context)
-      return
-    }
-
-    if (message?.type === 'runEval') {
-      await runEval(context)
       return
     }
 
@@ -324,43 +304,11 @@ async function showSessions(context) {
   }
 }
 
-async function compactSession(context) {
-  try {
-    const server = await ensureIdeServer(context)
-    chatPanel?.webview.postMessage({ type: 'status', text: 'Compacting current session...' })
-    const result = await postJson(server, '/compact', workspaceRequest())
-    chatPanel?.webview.postMessage({ type: 'compactResult', result })
-  } catch (error) {
-    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
-  }
-}
-
 async function cancelRun(context) {
   try {
     const server = await ensureIdeServer(context)
     await postJson(server, '/cancel', {})
     chatPanel?.webview.postMessage({ type: 'status', text: 'Cancel requested.' })
-  } catch (error) {
-    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
-  }
-}
-
-async function showDiff(context) {
-  try {
-    const server = await ensureIdeServer(context)
-    const result = await postJson(server, '/diff', workspaceRequest())
-    chatPanel?.webview.postMessage({ type: 'textBlock', title: 'Current Git Diff', text: String(result.text || '') })
-  } catch (error) {
-    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
-  }
-}
-
-async function runEval(context) {
-  try {
-    const server = await ensureIdeServer(context)
-    chatPanel?.webview.postMessage({ type: 'status', text: 'Running eval suite...' })
-    const result = await postJson(server, '/eval', {})
-    chatPanel?.webview.postMessage({ type: 'textBlock', title: result.ok ? 'Eval Passed' : 'Eval Failed', text: String(result.text || '') })
   } catch (error) {
     chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
   }
@@ -748,12 +696,12 @@ function renderChatHtml(webview) {
     .tool-card details, .sessions-card details { margin: 0; }
     .tool-card summary, .sessions-card summary { cursor: pointer; user-select: none; font-weight: 600; }
     .tool-result { max-height: 220px; overflow: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
-    .text-block { max-height: 360px; overflow: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
     .link-button { color: var(--vscode-textLink-foreground); background: none; border: 0; padding: 0; margin: 0; cursor: pointer; font: inherit; text-align: left; }
     .link-button:hover { text-decoration: underline; background: none; }
     .session-row { display: grid; gap: 3px; padding: 8px 0; border-top: 1px solid var(--vscode-panel-border); }
     .session-row:first-of-type { border-top: 0; }
     .session-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
+    .session-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .error { color: var(--vscode-errorForeground); }
     .approval { border-color: var(--vscode-editorWarning-foreground); background: var(--vscode-input-background); }
     .approval.resolved { border-color: var(--vscode-panel-border); opacity: 0.78; }
@@ -792,11 +740,7 @@ function renderChatHtml(webview) {
 <body>
   <div class="toolbar">
     <button id="new-chat">New Chat</button>
-    <button id="resume-latest">Resume Latest</button>
-    <button id="sessions">Sessions</button>
-    <button id="compact">Compact</button>
-    <button id="diff">Diff</button>
-    <button id="eval">Eval</button>
+    <button id="sessions">History</button>
   </div>
   <div class="workspace-strip">
     <div><strong>Workspace</strong>: <span id="workspace">detecting...</span></div>
@@ -807,30 +751,25 @@ function renderChatHtml(webview) {
     <textarea id="prompt" placeholder="Ask Jesse Agent about the current file or selection..."></textarea>
     <div class="composer-actions">
       <button id="ask">Ask</button>
-      <button id="stop" class="stop" disabled>Stop</button>
     </div>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const messages = document.getElementById('messages');
     const prompt = document.getElementById('prompt');
+    const askButton = document.getElementById('ask');
     const workspaceLabel = document.getElementById('workspace');
     const sessionLabel = document.getElementById('session');
     const runStatus = document.getElementById('run-status');
-    const stopButton = document.getElementById('stop');
     let currentAssistant = null;
     let lastToolCard = null;
+    let isRunning = false;
 
-    document.getElementById('ask').addEventListener('click', () => ask());
+    askButton.addEventListener('click', () => isRunning ? vscode.postMessage({ type: 'cancel' }) : ask());
     document.getElementById('new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
-    document.getElementById('resume-latest').addEventListener('click', () => vscode.postMessage({ type: 'resumeLatest' }));
     document.getElementById('sessions').addEventListener('click', () => vscode.postMessage({ type: 'showSessions' }));
-    document.getElementById('compact').addEventListener('click', () => vscode.postMessage({ type: 'compact' }));
-    document.getElementById('diff').addEventListener('click', () => vscode.postMessage({ type: 'showDiff' }));
-    document.getElementById('eval').addEventListener('click', () => vscode.postMessage({ type: 'runEval' }));
-    stopButton.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
     prompt.addEventListener('keydown', event => {
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) ask();
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !isRunning) ask();
     });
 
     function ask() {
@@ -850,8 +789,6 @@ function renderChatHtml(webview) {
       if (message.type === 'runState') setRunState(message.state);
       if (message.type === 'sessionLoaded') loadSession(message);
       if (message.type === 'sessions') addSessions(message.sessions || []);
-      if (message.type === 'compactResult') addCompactResult(message.result || {});
-      if (message.type === 'textBlock') addTextBlock(message.title, message.text);
       if (message.type === 'approvalRequest') addApproval(message.request);
       if (message.type === 'approvalSubmitted') markApproval(message.id, 'Submitted: ' + labelChoice(message.choice));
       if (message.type === 'approvalResolved') markApproval(message.id, 'Resolved: ' + labelChoice(message.choice));
@@ -888,8 +825,11 @@ function renderChatHtml(webview) {
     }
 
     function setRunState(state) {
-      runStatus.textContent = state === 'running' ? 'running' : 'idle';
-      stopButton.disabled = state !== 'running';
+      isRunning = state === 'running';
+      runStatus.textContent = isRunning ? 'running' : 'idle';
+      askButton.textContent = isRunning ? 'Stop' : 'Ask';
+      askButton.classList.toggle('stop', isRunning);
+      prompt.disabled = isRunning;
     }
 
     function loadSession(message) {
@@ -913,7 +853,7 @@ function renderChatHtml(webview) {
         row.className = 'session-row';
         const button = document.createElement('button');
         button.className = 'link-button';
-        button.textContent = session.id || '(unknown session)';
+        button.textContent = session.title || session.lastUserMessage || 'Untitled session';
         button.addEventListener('click', () => vscode.postMessage({ type: 'resumeSession', sessionId: session.id }));
         row.appendChild(button);
         const meta = document.createElement('div');
@@ -922,34 +862,12 @@ function renderChatHtml(webview) {
         row.appendChild(meta);
         if (session.lastUserMessage) {
           const last = document.createElement('div');
+          last.className = 'session-preview';
           last.textContent = session.lastUserMessage;
           row.appendChild(last);
         }
         item.appendChild(row);
       }
-      messages.appendChild(item);
-      window.scrollTo(0, document.body.scrollHeight);
-    }
-
-    function addCompactResult(result) {
-      if (!result.compacted) {
-        addMessage('status', 'Compact skipped: ' + (result.reason || 'not enough history'));
-        return;
-      }
-      addMessage('status', 'Compacted ' + result.compactedMessageCount + ' old messages. Messages: ' + result.beforeMessageCount + ' -> ' + result.afterMessageCount + '. Context chars: ' + result.contextChars);
-    }
-
-    function addTextBlock(title, text) {
-      const item = document.createElement('div');
-      item.className = 'msg log';
-      const heading = document.createElement('div');
-      heading.className = 'approval-title';
-      heading.textContent = title || 'Output';
-      item.appendChild(heading);
-      const block = document.createElement('pre');
-      block.className = 'text-block';
-      block.textContent = text || '';
-      item.appendChild(block);
       messages.appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
     }
