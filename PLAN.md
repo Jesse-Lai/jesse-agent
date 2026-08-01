@@ -338,7 +338,10 @@ User ←→ [Interface: CLI / future coding UI / IDE]
 - [x] Add `--sessions` and `/sessions` to list recent JSONL sessions with resume commands
 - [x] Add richer terminal file links with an OSC 8-style path helper
 - [x] Add task progress summaries with duration, output size, output path, and last activity
-- [ ] Consider IDE integration after the CLI core is stable
+- [x] Add first VS Code extension prototype after the CLI core is stable
+- [x] Add a one-shot `src/ideBridge.ts` JSONL adapter so editor clients can call the existing agent core without driving the terminal REPL
+- [x] Add commands for opening chat, asking about the current selection, and asking about the current file
+- [ ] Add full IDE patch/diff approval UI and a long-lived local agent server
 - [x] Keep the agent core UI-agnostic
 - **Why:** Interface polish matters, but it should wrap a stable engine rather than drive the architecture.
 

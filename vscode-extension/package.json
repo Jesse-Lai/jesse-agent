@@ -1,0 +1,52 @@
+{
+  "name": "jesse-agent-vscode",
+  "displayName": "Jesse Agent",
+  "description": "VS Code frontend for the local Jesse Agent core.",
+  "version": "0.0.1",
+  "publisher": "jesse-local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:jesseAgent.openChat",
+    "onCommand:jesseAgent.askSelection",
+    "onCommand:jesseAgent.askCurrentFile"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "jesseAgent.openChat",
+        "title": "Jesse Agent: Open Chat"
+      },
+      {
+        "command": "jesseAgent.askSelection",
+        "title": "Jesse Agent: Ask About Selection"
+      },
+      {
+        "command": "jesseAgent.askCurrentFile",
+        "title": "Jesse Agent: Ask About Current File"
+      }
+    ],
+    "configuration": {
+      "title": "Jesse Agent",
+      "properties": {
+        "jesseAgent.agentRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the jesse-agent project root. Leave empty to auto-detect."
+        },
+        "jesseAgent.permissionMode": {
+          "type": "string",
+          "enum": ["plan", "default", "acceptEdits"],
+          "default": "plan",
+          "description": "Permission mode used by VS Code one-shot requests. Plan is safest for the first IDE slice."
+        }
+      }
+    }
+  }
+}

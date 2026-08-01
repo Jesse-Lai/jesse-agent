@@ -11,3 +11,4 @@ dist/
 *.js.map
 *.d.ts
 !src/**
+!vscode-extension/extension.js
