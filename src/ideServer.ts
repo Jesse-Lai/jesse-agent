@@ -7,17 +7,20 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { stderr, stdout } from 'node:process'
+import type { ConfirmChoice } from './confirm.js'
 import { runAgent } from './loop.js'
 import { loadMcpRuntimeContext, type McpRuntimeContext } from './mcp.js'
 import { setExternalTools } from './tools/index.js'
-import { setProjectRoot } from './workingDirectory.js'
+import { getProjectRoot, setProjectRoot } from './workingDirectory.js'
 import { setPermissionMode } from './permissionMode.js'
+import { createAgentRuntimeContext } from './runtimeContext.js'
 import {
   buildFreshSystemPrompt,
   buildIdeMessages,
   normalizeMaxTurns,
   normalizeWorkspaceRoot,
   parseIdeRequest,
+  type IdeApprovalRequest,
   type IdeBridgeOutput,
   type IdeBridgeRequest,
 } from './ideProtocol.js'
@@ -30,8 +33,15 @@ const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 0
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 
+interface PendingApproval {
+  resolve: (choice: ConfirmChoice) => void
+  timer: NodeJS.Timeout
+}
+
 let mcpRuntime: McpRuntimeContext | null = null
 let busy = false
+let approvalCounter = 0
+const pendingApprovals = new Map<string, PendingApproval>()
 
 async function main(): Promise<void> {
   if (process.argv.includes('--help')) {
@@ -40,6 +50,7 @@ async function main(): Promise<void> {
       '',
       'Starts a local HTTP server for IDE clients.',
       'POST /ask with an IdeBridgeRequest JSON body returns JSONL events.',
+      'POST /approval resolves a pending IDE approval request.',
       '',
     ].join('\n'))
     return
@@ -64,6 +75,11 @@ async function main(): Promise<void> {
 
   const close = async () => {
     server.close()
+    for (const [id, pending] of pendingApprovals) {
+      clearTimeout(pending.timer)
+      pendingApprovals.delete(id)
+      pending.resolve('reject_once')
+    }
     await mcpRuntime?.close()
   }
   process.once('SIGINT', () => { void close().finally(() => process.exit(0)) })
@@ -73,7 +89,12 @@ async function main(): Promise<void> {
 async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     if (req.method === 'GET' && req.url === '/health') {
-      writeJson(res, 200, { ok: true, busy })
+      writeJson(res, 200, { ok: true, busy, pendingApprovals: pendingApprovals.size })
+      return
+    }
+
+    if (req.method === 'POST' && req.url === '/approval') {
+      await handleApproval(req, res)
       return
     }
 
@@ -111,7 +132,7 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
     await setProjectRoot(workspaceRoot)
   }
 
-  const permissionMode = request.permissionMode ?? 'plan'
+  const permissionMode = request.permissionMode ?? 'default'
   const modeResult = setPermissionMode(permissionMode)
   if (!modeResult.ok) throw new Error(modeResult.reason)
 
@@ -122,8 +143,17 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
   })
   writeJsonl(res, { type: 'ready', workspaceRoot, permissionMode })
 
+  const projectRoot = workspaceRoot ?? getProjectRoot()
+  const context = createAgentRuntimeContext({
+    projectRoot,
+    cwd: projectRoot,
+    originalProjectRoot: projectRoot,
+    approvalHandler: createIdeApprovalHandler(res),
+  })
+
   const messages = await buildIdeMessages(request, mcpRuntime)
   for await (const event of runAgent(messages, {
+    context,
     maxTurns: normalizeMaxTurns(request.maxTurns),
     refreshSystemPrompt: async currentMessages => {
       const first = currentMessages[0]
@@ -135,6 +165,52 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
 
   writeJsonl(res, { type: 'done', messageCount: messages.length })
   res.end()
+}
+
+async function handleApproval(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = JSON.parse(await readBody(req)) as { id?: unknown; choice?: unknown }
+  const id = typeof body.id === 'string' ? body.id : ''
+  const choice = normalizeApprovalChoice(body.choice)
+  if (!id || !choice) {
+    writeJson(res, 400, { error: 'approval id and valid choice are required' })
+    return
+  }
+
+  const pending = pendingApprovals.get(id)
+  if (!pending) {
+    writeJson(res, 404, { error: 'approval request not found or already resolved' })
+    return
+  }
+
+  clearTimeout(pending.timer)
+  pendingApprovals.delete(id)
+  pending.resolve(choice)
+  writeJson(res, 200, { ok: true })
+}
+
+function createIdeApprovalHandler(res: ServerResponse) {
+  return async function approve(request: Omit<IdeApprovalRequest, 'id'>): Promise<ConfirmChoice> {
+    const id = `approval-${Date.now()}-${++approvalCounter}`
+    const approvalRequest: IdeApprovalRequest = { id, ...request }
+
+    writeJsonl(res, { type: 'approval_request', request: approvalRequest })
+
+    const choice = await new Promise<ConfirmChoice>(resolve => {
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(id)
+        resolve('reject_once')
+      }, 10 * 60 * 1000)
+      pendingApprovals.set(id, { resolve, timer })
+    })
+
+    writeJsonl(res, { type: 'approval_response', id, choice })
+    return choice
+  }
+}
+
+function normalizeApprovalChoice(value: unknown): ConfirmChoice | null {
+  if (value === 'allow_once' || value === 'allow_for_session' || value === 'reject_once') return value
+  return null
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {

@@ -43,8 +43,8 @@
         "jesseAgent.permissionMode": {
           "type": "string",
           "enum": ["plan", "default", "acceptEdits"],
-          "default": "plan",
-          "description": "Permission mode used by VS Code local server requests. Plan is safest for the first IDE slice."
+          "default": "default",
+          "description": "Permission mode used by VS Code local server requests. Default asks for approval before non-read-only tools."
         }
       }
     }

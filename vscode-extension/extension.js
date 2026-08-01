@@ -83,6 +83,11 @@ function ensureChatPanel(context) {
   chatPanel.webview.onDidReceiveMessage(async message => {
     if (message?.type === 'ask') {
       await runPromptFromEditor(context, String(message.prompt || ''), { includeSelection: true })
+      return
+    }
+
+    if (message?.type === 'approval') {
+      await submitApproval(context, message)
     }
   })
 
@@ -157,12 +162,30 @@ function summarizeContext(context) {
 }
 
 function getPermissionMode() {
-  return vscode.workspace.getConfiguration('jesseAgent').get('permissionMode', 'plan')
+  return vscode.workspace.getConfiguration('jesseAgent').get('permissionMode', 'default')
 }
 
 async function runAgentBridge(context, request, onOutput) {
   const server = await ensureIdeServer(context)
   return await postAgentRequest(server, request, onOutput)
+}
+
+async function submitApproval(context, message) {
+  const id = String(message.approvalId || '')
+  const choice = String(message.choice || '')
+  if (!id || !isApprovalChoice(choice)) return
+
+  try {
+    const server = await ensureIdeServer(context)
+    await postApprovalRequest(server, { id, choice })
+    chatPanel?.webview.postMessage({ type: 'approvalSubmitted', id, choice })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+function isApprovalChoice(value) {
+  return value === 'allow_once' || value === 'allow_for_session' || value === 'reject_once'
 }
 
 async function ensureIdeServer(context) {
@@ -303,6 +326,37 @@ function postAgentRequest(server, request, onOutput) {
   })
 }
 
+function postApprovalRequest(server, request) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(request)
+    const httpRequest = http.request({
+      host: server.host,
+      port: server.port,
+      path: '/approval',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+    }, response => {
+      let responseBody = ''
+      response.on('data', chunk => {
+        responseBody += chunk.toString('utf8')
+      })
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(parseHttpError(responseBody) || `Jesse Agent approval returned HTTP ${response.statusCode}`))
+          return
+        }
+        resolve()
+      })
+    })
+
+    httpRequest.on('error', reject)
+    httpRequest.end(body)
+  })
+}
+
 function parseHttpError(body) {
   try {
     const value = JSON.parse(body)
@@ -314,6 +368,8 @@ function parseHttpError(body) {
 
 function mapBridgeOutput(output) {
   if (output.type === 'ready') return { type: 'status', text: `Connected (${output.permissionMode})` }
+  if (output.type === 'approval_request') return { type: 'approvalRequest', request: output.request }
+  if (output.type === 'approval_response') return { type: 'approvalResolved', id: output.id, choice: output.choice }
   if (output.type === 'done') return { type: 'done', text: `Done. Messages: ${output.messageCount}` }
   if (output.type === 'error') return { type: 'error', text: output.error }
   if (output.type !== 'agent_event') return { type: 'log', text: JSON.stringify(output) }
@@ -368,10 +424,20 @@ function renderChatHtml(webview) {
     .assistant { background: var(--vscode-editor-inactiveSelectionBackground); }
     .tool, .status, .error, .log { font-size: 12px; color: var(--vscode-descriptionForeground); }
     .error { color: var(--vscode-errorForeground); }
+    .approval { border-color: var(--vscode-editorWarning-foreground); background: var(--vscode-input-background); }
+    .approval.resolved { border-color: var(--vscode-panel-border); opacity: 0.78; }
+    .approval.resolved .approval-actions { display: none; }
+    .approval-title { font-weight: 600; margin-bottom: 8px; }
+    .approval-meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 8px; }
+    .approval-detail, .approval-diff { max-height: 280px; overflow: auto; margin: 8px 0; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .approval-actions button.reject { background: var(--vscode-inputValidation-errorBackground); color: var(--vscode-button-foreground); }
+    .approval-status { margin-top: 8px; color: var(--vscode-descriptionForeground); font-size: 12px; }
     .composer { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px; background: var(--vscode-editor-background); border-top: 1px solid var(--vscode-panel-border); }
     textarea { box-sizing: border-box; width: 100%; min-height: 64px; resize: vertical; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); padding: 8px; font-family: var(--vscode-font-family); }
     button { margin-top: 8px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: none; padding: 6px 12px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
+    button:disabled { opacity: 0.65; cursor: default; }
     .context { margin-top: 6px; color: var(--vscode-descriptionForeground); font-size: 11px; }
   </style>
 </head>
@@ -405,6 +471,9 @@ function renderChatHtml(webview) {
       if (message.type === 'user') addMessage('user', message.text, message.context);
       if (message.type === 'assistantDelta') appendAssistant(message.text);
       if (message.type === 'assistantText' && !currentAssistant) addMessage('assistant', message.text);
+      if (message.type === 'approvalRequest') addApproval(message.request);
+      if (message.type === 'approvalSubmitted') markApproval(message.id, 'Submitted: ' + labelChoice(message.choice));
+      if (message.type === 'approvalResolved') markApproval(message.id, 'Resolved: ' + labelChoice(message.choice));
       if (message.type === 'tool') addMessage('tool', message.text);
       if (message.type === 'status') addMessage('status', message.text);
       if (message.type === 'done') addMessage('status', message.text);
@@ -416,6 +485,92 @@ function renderChatHtml(webview) {
       if (!currentAssistant) currentAssistant = addMessage('assistant', '');
       currentAssistant.firstChild.textContent += text;
       window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function addApproval(request) {
+      const item = document.createElement('div');
+      item.className = 'msg approval';
+      item.dataset.approvalId = request.id;
+
+      const title = document.createElement('div');
+      title.className = 'approval-title';
+      title.textContent = request.title || ('Approve ' + request.toolName);
+      item.appendChild(title);
+
+      const meta = document.createElement('div');
+      meta.className = 'approval-meta';
+      meta.textContent = request.files && request.files.length ? 'Files: ' + request.files.join(', ') : 'Tool: ' + request.toolName;
+      item.appendChild(meta);
+
+      if (request.detail) {
+        const detail = document.createElement('pre');
+        detail.className = 'approval-detail';
+        detail.textContent = request.detail;
+        item.appendChild(detail);
+      }
+
+      if (request.previewError) {
+        const previewError = document.createElement('div');
+        previewError.className = 'error';
+        previewError.textContent = 'Preview warning: ' + request.previewError;
+        item.appendChild(previewError);
+      }
+
+      if (request.diff) {
+        const diff = document.createElement('pre');
+        diff.className = 'approval-diff';
+        diff.textContent = request.diff;
+        item.appendChild(diff);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'approval-actions';
+      actions.appendChild(approvalButton('Allow once', 'allow_once', request.id));
+      actions.appendChild(approvalButton('Allow for session', 'allow_for_session', request.id));
+      actions.appendChild(approvalButton('Reject', 'reject_once', request.id, 'reject'));
+      item.appendChild(actions);
+
+      const status = document.createElement('div');
+      status.className = 'approval-status';
+      status.textContent = 'Waiting for approval';
+      item.appendChild(status);
+
+      messages.appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function approvalButton(label, choice, approvalId, extraClass) {
+      const button = document.createElement('button');
+      button.textContent = label;
+      if (extraClass) button.className = extraClass;
+      button.addEventListener('click', () => {
+        setApprovalButtonsDisabled(approvalId, true);
+        markApproval(approvalId, 'Submitting: ' + labelChoice(choice));
+        vscode.postMessage({ type: 'approval', approvalId, choice });
+      });
+      return button;
+    }
+
+    function setApprovalButtonsDisabled(id, disabled) {
+      const item = document.querySelector('[data-approval-id="' + id + '"]');
+      if (!item) return;
+      item.querySelectorAll('button').forEach(button => { button.disabled = disabled; });
+    }
+
+    function markApproval(id, text) {
+      const item = document.querySelector('[data-approval-id="' + id + '"]');
+      if (!item) return;
+      item.classList.add('resolved');
+      item.querySelectorAll('button').forEach(button => { button.disabled = true; });
+      const status = item.querySelector('.approval-status');
+      if (status) status.textContent = text;
+    }
+
+    function labelChoice(choice) {
+      if (choice === 'allow_once') return 'Allow once';
+      if (choice === 'allow_for_session') return 'Allow for session';
+      if (choice === 'reject_once') return 'Reject';
+      return String(choice || 'unknown');
     }
 
     function addMessage(kind, text, context) {

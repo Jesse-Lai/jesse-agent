@@ -6,7 +6,9 @@
  */
 
 import { existsSync } from 'node:fs'
+import type { ConfirmChoice } from './confirm.js'
 import type { AgentEvent } from './loop.js'
+import type { ToolApprovalRequest } from './toolApprovals.js'
 import type { Message } from './llm.js'
 import type { McpRuntimeContext } from './mcp.js'
 import { loadProjectMemoryContext } from './memory.js'
@@ -36,9 +38,15 @@ export interface IdeBridgeContext {
   diagnostics?: string
 }
 
+export interface IdeApprovalRequest extends ToolApprovalRequest {
+  id: string
+}
+
 export type IdeBridgeOutput =
   | { type: 'ready'; workspaceRoot?: string; permissionMode: PermissionMode }
   | { type: 'agent_event'; event: AgentEvent }
+  | { type: 'approval_request'; request: IdeApprovalRequest }
+  | { type: 'approval_response'; id: string; choice: ConfirmChoice }
   | { type: 'done'; messageCount: number }
   | { type: 'error'; error: string }
 

@@ -24,11 +24,14 @@ import { checkPermission, describeRule, rememberSessionAllowRule } from '../perm
 import { isPathWithinProjectRoot, resolveWorkingDirectory } from '../workingDirectory.js'
 import { classifyBashCommand } from '../bashClassifier.js'
 import { getPermissionMode, permissionModeTitle } from '../permissionMode.js'
+import { buildToolApprovalRequest } from '../toolApprovals.js'
 
 /** 执行结果：成功带内容，失败带原因（都会被喂回给模型）。 */
 export interface ExecuteResult {
   ok: boolean
   content: string
+  /** Stop the current agent run after reporting this result. */
+  stop?: boolean
 }
 
 export interface ExecuteToolOptions {
@@ -191,7 +194,10 @@ async function permission(
   // run_command 展示命令本身；其他危险工具展示工具名 + 参数。
   const detail = describeDangerousAction(tool.name, args)
 
-  const choice = await confirm(detail)
+  const approvalRequest = await buildToolApprovalRequest(tool.name, args, detail, context)
+  const choice = context?.approvalHandler
+    ? await context.approvalHandler(approvalRequest)
+    : await confirm(detail)
   if (choice === 'allow_once') return null // 用户同意一次 → 继续执行
 
   if (choice === 'allow_for_session') {
@@ -200,8 +206,8 @@ async function permission(
     return null
   }
 
-  // 用户拒绝 → 中止执行，把拒绝信息作为结果返回给模型。
-  return { ok: false, content: '用户拒绝了此操作。' }
+  // 用户拒绝 → 中止当前 agent run，避免模型下一轮重复请求同一个危险操作。
+  return { ok: false, content: '用户拒绝了此操作，已停止当前运行。', stop: true }
 }
 
 function permissionInPlanMode(tool: Tool, args: Record<string, unknown>): ExecuteResult | null {

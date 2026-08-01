@@ -20,6 +20,7 @@ import type { Tool } from '../types.js'
 import { setPermissionMode } from '../permissionMode.js'
 import { rememberSessionAllowRule } from '../permissions.js'
 import { getOriginalProjectRoot, getProjectRoot, setProjectRoot } from '../workingDirectory.js'
+import { executeTool } from '../tools/executor.js'
 import { editFileTool } from '../tools/editFile.js'
 import { readFileTool } from '../tools/readFile.js'
 import { runCommandTool } from '../tools/runCommand.js'
@@ -59,6 +60,9 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runValidationEval,
     runReadBeforeWriteEval,
     runReadEditVerifyEval,
+    runIdeApprovalAllowsEditEval,
+    runIdeApprovalRejectsEditEval,
+    runIdeApprovalRejectStopsRunEval,
     runAgentWorktreeIsolationEval,
     runBackgroundAgentTaskEval,
     runPerAgentRuntimeContextEval,
@@ -178,6 +182,143 @@ async function runReadEditVerifyEval(): Promise<EvalResult> {
   }, root)
 }
 
+async function runIdeApprovalAllowsEditEval(): Promise<EvalResult> {
+  const root = await createMathProject('ide-approval-allow-edit')
+
+  return runCase('ide-approval-allows-edit', async checks => {
+    await setProjectRoot(root)
+    setPermissionMode('default')
+
+    const approvalRequests: Array<{ diff?: string; toolName: string }> = []
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-ide-approval-allow',
+      projectRoot: root,
+      cwd: root,
+      originalProjectRoot: root,
+      approvalHandler: async request => {
+        approvalRequests.push({ diff: request.diff, toolName: request.toolName })
+        return 'allow_once'
+      },
+    })
+
+    await readFileTool.execute({ path: 'src/math.js' }, context)
+    const result = await executeTool('edit_file', {
+      path: 'src/math.js',
+      old_string: 'return a - b',
+      new_string: 'return a + b',
+    }, { tools: EVAL_TOOLS, context })
+    const content = await readFile(join(root, 'src/math.js'), 'utf8')
+    const diff = approvalRequests[0]?.diff ?? ''
+
+    check(checks, 'approval handler was called for edit_file', approvalRequests.length === 1 && approvalRequests[0]?.toolName === 'edit_file', JSON.stringify(approvalRequests))
+    check(checks, 'approval diff shows old and new lines', diff.includes('-  return a - b') && diff.includes('+  return a + b'), diff)
+    check(checks, 'allow approval lets edit_file execute', result.ok === true && result.content.includes('编辑文件成功'), result.content)
+    check(checks, 'file was changed after approval', content.includes('return a + b'))
+  }, root)
+}
+
+async function runIdeApprovalRejectsEditEval(): Promise<EvalResult> {
+  const root = await createMathProject('ide-approval-reject-edit')
+
+  return runCase('ide-approval-rejects-edit', async checks => {
+    await setProjectRoot(root)
+    setPermissionMode('default')
+
+    const approvalRequests: Array<{ diff?: string; toolName: string }> = []
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-ide-approval-reject',
+      projectRoot: root,
+      cwd: root,
+      originalProjectRoot: root,
+      approvalHandler: async request => {
+        approvalRequests.push({ diff: request.diff, toolName: request.toolName })
+        return 'reject_once'
+      },
+    })
+
+    await readFileTool.execute({ path: 'src/math.js' }, context)
+    const result = await executeTool('edit_file', {
+      path: 'src/math.js',
+      old_string: 'return a - b',
+      new_string: 'return a + b',
+    }, { tools: EVAL_TOOLS, context })
+    const content = await readFile(join(root, 'src/math.js'), 'utf8')
+    const diff = approvalRequests[0]?.diff ?? ''
+
+    check(checks, 'approval handler was called before rejection', approvalRequests.length === 1 && approvalRequests[0]?.toolName === 'edit_file', JSON.stringify(approvalRequests))
+    check(checks, 'rejection still had a diff preview', diff.includes('-  return a - b') && diff.includes('+  return a + b'), diff)
+    check(checks, 'reject approval blocks edit_file', result.ok === false && result.content.includes('用户拒绝'), result.content)
+    check(checks, 'file stayed unchanged after rejection', content.includes('return a - b') && !content.includes('return a + b'), content)
+  }, root)
+}
+
+async function runIdeApprovalRejectStopsRunEval(): Promise<EvalResult> {
+  const root = await createMathProject('ide-approval-reject-stops-run')
+
+  return runCase('ide-approval-reject-stops-run', async checks => {
+    await setProjectRoot(root)
+    setPermissionMode('default')
+
+    const approvalRequests: Array<{ diff?: string; toolName: string }> = []
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-ide-approval-reject-stops',
+      projectRoot: root,
+      cwd: root,
+      originalProjectRoot: root,
+      approvalHandler: async request => {
+        approvalRequests.push({ diff: request.diff, toolName: request.toolName })
+        return 'reject_once'
+      },
+    })
+
+    const script: ScriptedStep[] = [
+      { type: 'tool_calls', calls: [{ name: 'read_file', args: { path: 'src/math.js' } }] },
+      {
+        type: 'tool_calls',
+        calls: [{
+          name: 'edit_file',
+          args: {
+            path: 'src/math.js',
+            old_string: 'return a - b',
+            new_string: 'return a + b',
+          },
+        }],
+      },
+      {
+        type: 'tool_calls',
+        calls: [{
+          name: 'edit_file',
+          args: {
+            path: 'src/math.js',
+            old_string: 'return a - b',
+            new_string: 'return a + b',
+          },
+        }],
+      },
+    ]
+    const steps = [...script]
+    const events: AgentEvent[] = []
+    for await (const event of runAgent([
+      { role: 'user', content: 'Try to edit; the user will reject approval.' },
+    ], {
+      tools: EVAL_TOOLS,
+      maxTurns: script.length + 1,
+      llmStream: createScriptedLLM(steps),
+      context,
+    })) {
+      events.push(event)
+    }
+
+    const content = await readFile(join(root, 'src/math.js'), 'utf8')
+    const editResult = toolResult(events, 'edit_file')
+
+    check(checks, 'only one approval request was shown', approvalRequests.length === 1, JSON.stringify(approvalRequests))
+    check(checks, 'run stopped before repeated edit request', toolStarts(events).join(' -> ') === 'read_file -> edit_file', toolStarts(events).join(' -> '))
+    check(checks, 'rejected edit result reports stop', Boolean(editResult?.content.includes('已停止当前运行')), editResult?.content)
+    check(checks, 'script left repeated edit step unused', steps.length === 1, String(steps.length) + ' unused step(s)')
+    check(checks, 'file stayed unchanged after stopped run', content.includes('return a - b') && !content.includes('return a + b'), content)
+  }, root)
+}
 async function runAgentWorktreeIsolationEval(): Promise<EvalResult> {
   const root = await createGitProject('agent-worktree-isolation')
 

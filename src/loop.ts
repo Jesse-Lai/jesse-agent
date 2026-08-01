@@ -158,6 +158,8 @@ export async function* runAgent(
         content: result.content,
         tool_call_id: toolCall.id,
       })
+
+      if (result.stop) return
     }
 
     await options.refreshSystemPrompt?.(messages)

@@ -20,19 +20,19 @@ First IDE slice for the local Jesse Agent core.
    - `Jesse Agent: Ask About Selection`
    - `Jesse Agent: Ask About Current File`
 
-By default, requests use `permissionMode=plan`, so this first slice is read-only and cannot block on terminal confirmations.
+By default, requests use `permissionMode=default`. Read-only tools run directly; file edits and other non-read-only tools show an approval card in the Jesse Agent panel before execution.
 
 ## Settings
 
 - `jesseAgent.agentRoot`: path to the `jesse-agent` project root. Leave empty for auto-detect during local development.
-- `jesseAgent.permissionMode`: `plan`, `default`, or `acceptEdits`. Keep `plan` for the current prototype.
+- `jesseAgent.permissionMode`: `plan`, `default`, or `acceptEdits`. Use `default` for IDE approval cards; `plan` stays read-only; `acceptEdits` skips project-local edit approvals. Reject will stop the current agent run and will not keep asking about the same rejected tool call.
 
 ## Architecture
 
-The extension calls:
+The extension starts:
 
 ```text
-npm run ide
+npm run ide:server
 ```
 
-from the Jesse Agent root and sends a JSON request over stdin. `src/ideBridge.ts` streams JSONL events back over stdout. The bridge reuses the existing agent core instead of driving the terminal REPL.
+from the Jesse Agent root. `src/ideServer.ts` stays running on `127.0.0.1`, streams JSONL events for `POST /ask`, and accepts `POST /approval` when the user approves or rejects a pending tool request. The one-shot `npm run ide` bridge remains available for scripts and debugging.

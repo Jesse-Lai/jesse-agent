@@ -181,7 +181,7 @@ Background task output uses `src/taskDisplay.ts` to show status, duration, outpu
 
 The first IDE slice lives in `vscode-extension/`. It contributes a Jesse Agent chat panel plus commands for asking about the current selection or current file. The extension does not drive the terminal REPL; it starts `npm run ide:server`, which runs `src/ideServer.ts` as a long-lived local HTTP server around the existing agent core. `npm run ide` remains available as a one-shot JSONL bridge for scripts and debugging.
 
-Run it locally by opening `vscode-extension/` in VS Code and pressing `F5`. The default permission mode is `plan`, so editor requests are read-only and cannot block on terminal confirmations. The local server listens only on `127.0.0.1` and streams JSONL events back to the extension for each `POST /ask` request.
+Run it locally by opening `vscode-extension/` in VS Code and pressing `F5`. The default permission mode is `default`: read-only tools run directly, while file edits and other non-read-only tools show an approval card in the Jesse Agent panel before execution. The local server listens only on `127.0.0.1`, streams JSONL events back to the extension for each `POST /ask` request, and accepts `POST /approval` to resume a paused tool call.
 
 Useful local commands:
 

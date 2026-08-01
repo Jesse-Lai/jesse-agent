@@ -7,6 +7,7 @@
  * current global project root.
  */
 
+import type { ToolApprovalHandler } from './toolApprovals.js'
 import type { WorktreeSession } from './worktrees.js'
 import { getOriginalProjectRoot, getProjectRoot } from './workingDirectory.js'
 
@@ -19,6 +20,7 @@ export interface AgentRuntimeContext {
   /** Original root for the parent session; useful when a worktree is active. */
   originalProjectRoot: string
   worktreeSession?: WorktreeSession | null
+  approvalHandler?: ToolApprovalHandler
 }
 
 export function createAgentRuntimeContext(input: Partial<AgentRuntimeContext> = {}): AgentRuntimeContext {
@@ -29,5 +31,6 @@ export function createAgentRuntimeContext(input: Partial<AgentRuntimeContext> = 
     cwd: input.cwd ?? projectRoot,
     originalProjectRoot: input.originalProjectRoot ?? getOriginalProjectRoot(),
     worktreeSession: input.worktreeSession ?? null,
+    approvalHandler: input.approvalHandler,
   }
 }
