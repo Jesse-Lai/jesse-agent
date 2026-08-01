@@ -74,6 +74,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runReadFileRangeEval,
     runImplementationTraceGuidanceEval,
     runIdeTimelineUiEval,
+    runVsCodePackagingConfigEval,
   ]
 
   const results: EvalResult[] = []
@@ -674,6 +675,26 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
       source.includes('Run finished')
     ))
     check(checks, 'top session label hides raw session id', source.includes("sessionLabel.textContent = 'active'"))
+    check(checks, 'workspace selector is available', source.includes('selectWorkspace') && source.includes('workspaceOptions'))
+    check(checks, 'dev controls are hidden behind dev mode', source.includes('dev-only') && source.includes("message.devMode === true"))
+    check(checks, 'changed files summary exists', source.includes('Files changed in this run') && source.includes('recordChangedFileFromTool'))
+    check(checks, 'tool results use linked text renderer', source.includes('renderLinkedText(result') && source.includes('Dockerfile'))
+  })
+}
+
+async function runVsCodePackagingConfigEval(): Promise<EvalResult> {
+  return runCase('vscode-packaging-config', async checks => {
+    const root = getOriginalProjectRoot()
+    const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
+    const extensionJson = JSON.parse(await readFile(join(root, 'vscode-extension', 'package.json'), 'utf8')) as Record<string, unknown>
+    const scripts = packageJson.scripts as Record<string, unknown> | undefined
+    const contributes = extensionJson.contributes as { commands?: Array<{ command?: string }>; configuration?: { properties?: Record<string, unknown> } } | undefined
+    const activationEvents = extensionJson.activationEvents as string[] | undefined
+
+    check(checks, 'root package has VS Code package script', typeof scripts?.['package:vscode'] === 'string' && String(scripts['package:vscode']).includes('vsce package'))
+    check(checks, 'select workspace command is registered', Boolean(contributes?.commands?.some(command => command.command === 'jesseAgent.selectWorkspace')))
+    check(checks, 'select workspace activation is registered', Boolean(activationEvents?.includes('onCommand:jesseAgent.selectWorkspace')))
+    check(checks, 'dev mode setting is registered', Boolean(contributes?.configuration?.properties?.['jesseAgent.devMode']))
   })
 }
 

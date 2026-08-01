@@ -4,7 +4,18 @@
   "description": "VS Code frontend for the local Jesse Agent core.",
   "version": "0.0.1",
   "publisher": "jesse-local",
+  "license": "UNLICENSED",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jesse-Lai/jesse-agent.git"
+  },
+  "files": [
+    "extension.js",
+    "LICENSE",
+    "package.json",
+    "README.md"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -17,7 +28,8 @@
     "onCommand:jesseAgent.askCurrentFile",
     "onCommand:jesseAgent.explainDiagnostics",
     "onCommand:jesseAgent.fixDiagnostics",
-    "onCommand:jesseAgent.reviewChanges"
+    "onCommand:jesseAgent.reviewChanges",
+    "onCommand:jesseAgent.selectWorkspace"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -45,6 +57,10 @@
       {
         "command": "jesseAgent.reviewChanges",
         "title": "Jesse Agent: Review Current Changes"
+      },
+      {
+        "command": "jesseAgent.selectWorkspace",
+        "title": "Jesse Agent: Select Workspace"
       }
     ],
     "configuration": {
@@ -60,6 +76,11 @@
           "enum": ["plan", "default", "acceptEdits"],
           "default": "default",
           "description": "Permission mode used by VS Code local server requests. Default asks for approval before non-read-only tools."
+        },
+        "jesseAgent.devMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show internal Jesse Agent developer controls such as health, eval, raw diff, and compact."
         }
       }
     }

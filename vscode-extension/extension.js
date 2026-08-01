@@ -9,6 +9,7 @@ let ideServer = null
 let ideServerStartPromise = null
 let chatMessages = []
 let currentSessionId = null
+let selectedWorkspaceRoot = null
 let runInProgress = false
 
 function activate(context) {
@@ -19,6 +20,9 @@ function activate(context) {
     vscode.commands.registerCommand('jesseAgent.explainDiagnostics', () => explainDiagnostics(context)),
     vscode.commands.registerCommand('jesseAgent.fixDiagnostics', () => fixDiagnostics(context)),
     vscode.commands.registerCommand('jesseAgent.reviewChanges', () => reviewChanges(context)),
+    vscode.commands.registerCommand('jesseAgent.selectWorkspace', () => selectWorkspace(context)),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => syncWorkspaceState()),
+    vscode.window.onDidChangeActiveTextEditor(() => syncWorkspaceState()),
   )
 }
 
@@ -113,6 +117,44 @@ async function reviewChanges(context) {
   await runPromptFromEditor(context, 'Review the current git changes in this workspace. Start with git status and git diff. Focus on bugs, regressions, risky assumptions, and missing tests. Do not edit files unless I explicitly ask.', { includeSelection: false })
 }
 
+async function selectWorkspace(context) {
+  const folders = vscode.workspace.workspaceFolders || []
+  if (folders.length === 0) {
+    vscode.window.showInformationMessage('Open a workspace folder first.')
+    return
+  }
+
+  if (folders.length === 1) {
+    selectedWorkspaceRoot = folders[0].uri.fsPath
+  } else {
+    const picked = await vscode.window.showQuickPick(
+      folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, folder })),
+      { title: 'Select Jesse Agent workspace' },
+    )
+    if (!picked) return
+    selectedWorkspaceRoot = picked.folder.uri.fsPath
+  }
+
+  currentSessionId = null
+  chatMessages = []
+  syncWorkspaceState('Workspace selected')
+  if (chatPanel) await showSessions(context)
+}
+
+function syncWorkspaceState(label) {
+  if (!selectedWorkspaceRoot || !workspaceFolders().some(folder => folder.uri.fsPath === selectedWorkspaceRoot)) {
+    selectedWorkspaceRoot = null
+  }
+  chatPanel?.webview.postMessage({
+    type: 'serverState',
+    workspaceRoot: workspaceRequest().workspaceRoot,
+    sessionId: currentSessionId,
+    devMode: getDevMode(),
+    workspaceOptions: workspaceOptions(),
+  })
+  if (label) chatPanel?.webview.postMessage({ type: 'status', text: label })
+}
+
 function ensureChatPanel(context) {
   if (chatPanel) return chatPanel
 
@@ -128,6 +170,8 @@ function ensureChatPanel(context) {
       type: 'serverState',
       workspaceRoot: workspaceRequest().workspaceRoot,
       sessionId: currentSessionId,
+      devMode: getDevMode(),
+      workspaceOptions: workspaceOptions(),
     })
   }, 0)
   chatPanel.onDidDispose(() => {
@@ -152,6 +196,31 @@ function ensureChatPanel(context) {
 
     if (message?.type === 'showSessions') {
       await showSessions(context)
+      return
+    }
+
+    if (message?.type === 'selectWorkspace') {
+      await selectWorkspace(context)
+      return
+    }
+
+    if (message?.type === 'devHealth') {
+      await showHealth(context)
+      return
+    }
+
+    if (message?.type === 'devEval') {
+      await runEval(context)
+      return
+    }
+
+    if (message?.type === 'devDiff') {
+      await showDiff(context)
+      return
+    }
+
+    if (message?.type === 'devCompact') {
+      await compactSession(context)
       return
     }
 
@@ -212,11 +281,12 @@ async function runPromptFromEditor(context, prompt, options) {
 
 function collectEditorContext(options) {
   const editor = vscode.window.activeTextEditor
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+  const activeFilePath = editor?.document?.uri?.scheme === 'file' ? editor.document.uri.fsPath : undefined
+  const workspaceRoot = activeWorkspaceRoot(activeFilePath)
   if (!editor) return { workspaceRoot }
 
   const document = editor.document
-  const activeFile = document.uri.scheme === 'file' ? document.uri.fsPath : undefined
+  const activeFile = activeFilePath && isPathInside(activeFilePath, workspaceRoot) ? activeFilePath : undefined
   const selectedText = options.includeSelection && !editor.selection.isEmpty
     ? document.getText(editor.selection)
     : undefined
@@ -252,6 +322,10 @@ function summarizeContext(context) {
 
 function getPermissionMode() {
   return vscode.workspace.getConfiguration('jesseAgent').get('permissionMode', 'default')
+}
+
+function getDevMode() {
+  return vscode.workspace.getConfiguration('jesseAgent').get('devMode', false) === true
 }
 
 async function runAgentBridge(context, request, onOutput) {
@@ -314,6 +388,51 @@ async function cancelRun(context) {
   }
 }
 
+async function showHealth(context) {
+  if (!getDevMode()) return
+  try {
+    const server = await ensureIdeServer(context)
+    const result = await getJson(server, '/health')
+    chatPanel?.webview.postMessage({ type: 'devOutput', title: 'Server health', text: JSON.stringify(result, null, 2) })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function runEval(context) {
+  if (!getDevMode()) return
+  try {
+    chatPanel?.webview.postMessage({ type: 'status', text: 'Running eval...' })
+    const server = await ensureIdeServer(context)
+    const result = await postJson(server, '/eval', {})
+    chatPanel?.webview.postMessage({ type: 'devOutput', title: result.ok ? 'Eval passed' : 'Eval failed', text: result.text || '' })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function showDiff(context) {
+  if (!getDevMode()) return
+  try {
+    const server = await ensureIdeServer(context)
+    const result = await postJson(server, '/diff', workspaceRequest())
+    chatPanel?.webview.postMessage({ type: 'devOutput', title: 'Workspace diff', text: result.text || '' })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function compactSession(context) {
+  if (!getDevMode()) return
+  try {
+    const server = await ensureIdeServer(context)
+    const result = await postJson(server, '/compact', workspaceRequest())
+    chatPanel?.webview.postMessage({ type: 'devOutput', title: 'Compact result', text: JSON.stringify(result, null, 2) })
+  } catch (error) {
+    chatPanel?.webview.postMessage({ type: 'error', text: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 async function openFileFromWebview(message) {
   const filePath = String(message.filePath || '')
   if (!filePath) return
@@ -347,13 +466,45 @@ function loadSessionIntoPanel(result, label) {
 }
 
 function workspaceRequest() {
-  return { workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath }
+  return { workspaceRoot: activeWorkspaceRoot() }
 }
 
 function resolveWorkspacePath(filePath) {
   if (path.isAbsolute(filePath)) return filePath
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+  const workspaceRoot = activeWorkspaceRoot()
   return workspaceRoot ? path.join(workspaceRoot, filePath) : filePath
+}
+
+function activeWorkspaceRoot(filePath) {
+  const folders = workspaceFolders()
+  if (selectedWorkspaceRoot && folders.some(folder => folder.uri.fsPath === selectedWorkspaceRoot)) {
+    return selectedWorkspaceRoot
+  }
+  selectedWorkspaceRoot = null
+  if (filePath) {
+    const owner = folders.find(folder => isPathInside(filePath, folder.uri.fsPath))
+    if (owner) return owner.uri.fsPath
+  }
+  return folders[0]?.uri.fsPath
+}
+
+function workspaceFolders() {
+  return Array.from(vscode.workspace.workspaceFolders || [])
+}
+
+function workspaceOptions() {
+  const selected = activeWorkspaceRoot()
+  return workspaceFolders().map(folder => ({
+    name: folder.name,
+    path: folder.uri.fsPath,
+    selected: folder.uri.fsPath === selected,
+  }))
+}
+
+function isPathInside(filePath, rootPath) {
+  if (!filePath || !rootPath) return false
+  const relativePath = path.relative(rootPath, filePath)
+  return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
 }
 
 function isApprovalChoice(value) {
@@ -686,6 +837,8 @@ function renderChatHtml(webview) {
     body { margin: 0; padding: 16px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); }
     .toolbar { position: sticky; top: 0; z-index: 2; display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: 10px; background: var(--vscode-editor-background); border-bottom: 1px solid var(--vscode-panel-border); }
     .toolbar button, .composer-actions button { margin-top: 0; padding: 5px 9px; }
+    .dev-only { display: none; }
+    body.dev .dev-only { display: inline-flex; }
     .workspace-strip { display: grid; gap: 3px; margin: 10px 0 12px; color: var(--vscode-descriptionForeground); font-size: 11px; }
     .workspace-strip strong { color: var(--vscode-foreground); font-weight: 600; }
     .messages { display: flex; flex-direction: column; gap: 12px; padding-bottom: 118px; }
@@ -696,6 +849,7 @@ function renderChatHtml(webview) {
     .tool-card details, .sessions-card details { margin: 0; }
     .tool-card summary, .sessions-card summary { cursor: pointer; user-select: none; font-weight: 600; }
     .tool-result { max-height: 220px; overflow: auto; margin-top: 8px; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
+    .changed-files { display: grid; gap: 5px; }
     .timeline-card { display: grid; gap: 8px; background: var(--vscode-editor-background); }
     .timeline-title { font-weight: 600; }
     .timeline-list { display: grid; gap: 7px; }
@@ -752,9 +906,13 @@ function renderChatHtml(webview) {
   <div class="toolbar">
     <button id="new-chat">New Chat</button>
     <button id="sessions">History</button>
+    <button id="dev-health" class="dev-only">Health</button>
+    <button id="dev-diff" class="dev-only">Diff</button>
+    <button id="dev-compact" class="dev-only">Compact</button>
+    <button id="dev-eval" class="dev-only">Eval</button>
   </div>
   <div class="workspace-strip">
-    <div><strong>Workspace</strong>: <span id="workspace">detecting...</span></div>
+    <div><strong>Workspace</strong>: <span id="workspace">detecting...</span> <button id="workspace-change" class="link-button">Change</button></div>
     <div><strong>Session</strong>: <span id="session">none</span> · <strong>Status</strong>: <span id="run-status">idle</span></div>
   </div>
   <div id="messages" class="messages"></div>
@@ -775,11 +933,18 @@ function renderChatHtml(webview) {
     let currentAssistant = null;
     let lastToolCard = null;
     let currentTimeline = null;
+    let currentToolCall = null;
+    let currentRunChangedFiles = new Map();
     let isRunning = false;
 
     askButton.addEventListener('click', () => isRunning ? vscode.postMessage({ type: 'cancel' }) : ask());
     document.getElementById('new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
     document.getElementById('sessions').addEventListener('click', () => vscode.postMessage({ type: 'showSessions' }));
+    document.getElementById('workspace-change').addEventListener('click', () => vscode.postMessage({ type: 'selectWorkspace' }));
+    document.getElementById('dev-health').addEventListener('click', () => vscode.postMessage({ type: 'devHealth' }));
+    document.getElementById('dev-diff').addEventListener('click', () => vscode.postMessage({ type: 'devDiff' }));
+    document.getElementById('dev-compact').addEventListener('click', () => vscode.postMessage({ type: 'devCompact' }));
+    document.getElementById('dev-eval').addEventListener('click', () => vscode.postMessage({ type: 'devEval' }));
     prompt.addEventListener('keydown', event => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !isRunning) ask();
     });
@@ -807,17 +972,18 @@ function renderChatHtml(webview) {
       }
       if (message.type === 'approvalSubmitted') {
         addTimelineEvent('approval', 'Approval submitted', labelChoice(message.choice));
-        markApproval(message.id, 'Submitted: ' + labelChoice(message.choice));
+        markApproval(message.id, 'Submitted: ' + labelChoice(message.choice), false);
       }
       if (message.type === 'approvalResolved') {
         addTimelineEvent(message.choice === 'reject_once' ? 'error' : 'approval', 'Approval resolved', labelChoice(message.choice));
-        markApproval(message.id, 'Resolved: ' + labelChoice(message.choice));
+        markApproval(message.id, approvalResolvedText(message.choice), true);
       }
       if (message.type === 'toolStart') {
         addTimelineEvent('running', 'Tool started', summarizeToolAction(message.name, message.args));
         addToolStart(message.name, message.args);
       }
       if (message.type === 'toolResult') {
+        recordChangedFileFromTool(message.name, message.ok);
         addTimelineEvent(message.ok ? 'done' : 'error', message.ok ? 'Tool finished' : 'Tool failed', summarizeToolResult(message.name, message.ok, message.content));
         addToolResult(message.name, message.ok, message.content);
       }
@@ -826,11 +992,13 @@ function renderChatHtml(webview) {
         finalizeAssistantLinks();
         updateServerState(message);
         addTimelineEvent(message.cancelled ? 'error' : 'done', message.cancelled ? 'Run cancelled' : 'Run finished', message.text);
+        addChangedFilesSummary();
       }
       if (message.type === 'error') {
         addTimelineEvent('error', 'Error', message.text);
         addMessage('error', message.text);
       }
+      if (message.type === 'devOutput') addDevOutput(message.title, message.text);
       if (message.type === 'log') addMessage('log', message.text);
     });
 
@@ -852,6 +1020,8 @@ function renderChatHtml(webview) {
       if (message.workspaceRoot) workspaceLabel.textContent = message.workspaceRoot;
       if (message.cwd && !message.workspaceRoot) workspaceLabel.textContent = message.cwd;
       if (message.sessionId) sessionLabel.textContent = 'active' + (message.messageCount ? ' · ' + message.messageCount + ' messages' : '');
+      document.body.classList.toggle('dev', message.devMode === true);
+      updateWorkspaceChangeVisibility(message.workspaceOptions || []);
       if (isRunning && message.text) {
         const meta = [message.permissionMode, message.cwd || message.workspaceRoot].filter(Boolean).join(' · ');
         addTimelineEvent('running', 'Connected to local agent', meta || message.text);
@@ -866,6 +1036,8 @@ function renderChatHtml(webview) {
       askButton.classList.toggle('stop', isRunning);
       prompt.disabled = isRunning;
       if (!wasRunning && isRunning) {
+        currentToolCall = null;
+        currentRunChangedFiles = new Map();
         startTimeline();
         addTimelineEvent('running', 'Run started', 'Waiting for agent events');
       }
@@ -876,9 +1048,19 @@ function renderChatHtml(webview) {
       currentAssistant = null;
       lastToolCard = null;
       currentTimeline = null;
+      currentToolCall = null;
+      currentRunChangedFiles = new Map();
       updateServerState(message);
       addMessage('status', message.label + (message.messageCount ? ': ' + message.messageCount + ' messages' : ''));
       for (const item of message.messages || []) addMessage(item.role, item.content);
+    }
+
+    function updateWorkspaceChangeVisibility(options) {
+      const button = document.getElementById('workspace-change');
+      if (!button) return;
+      button.style.display = options.length > 1 ? 'inline' : 'none';
+      const selected = options.find(item => item && item.selected);
+      if (selected && selected.path) workspaceLabel.textContent = selected.path;
     }
 
     function addStatus(text) {
@@ -996,6 +1178,54 @@ function renderChatHtml(webview) {
       return name + ' · ' + (ok ? 'ok' : 'error') + ' · ' + size + ' chars';
     }
 
+    function recordChangedFileFromTool(name, ok) {
+      if (!ok || !currentToolCall || currentToolCall.name !== name) return;
+      if (name !== 'write_file' && name !== 'edit_file') return;
+      const input = asObject(currentToolCall.args);
+      const filePath = stringValue(input.path, '');
+      if (!filePath) return;
+      currentRunChangedFiles.set(filePath, name);
+    }
+
+    function addChangedFilesSummary() {
+      if (currentRunChangedFiles.size === 0) return;
+      const item = document.createElement('div');
+      item.className = 'msg status changed-files';
+      const title = document.createElement('div');
+      title.className = 'approval-title';
+      title.textContent = 'Files changed in this run';
+      item.appendChild(title);
+      for (const [filePath, action] of currentRunChangedFiles.entries()) {
+        const row = document.createElement('div');
+        const button = document.createElement('button');
+        button.className = 'link-button';
+        button.textContent = filePath;
+        button.addEventListener('click', () => vscode.postMessage({ type: 'openFile', filePath }));
+        row.appendChild(button);
+        row.appendChild(document.createTextNode(' · ' + action));
+        item.appendChild(row);
+      }
+      messages.appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function addDevOutput(title, text) {
+      const item = document.createElement('div');
+      item.className = 'msg log tool-card';
+      const details = document.createElement('details');
+      details.open = true;
+      const summary = document.createElement('summary');
+      summary.textContent = title || 'Developer output';
+      details.appendChild(summary);
+      const body = document.createElement('div');
+      body.className = 'tool-result';
+      renderLinkedText(body, previewText(text || '', 8000));
+      details.appendChild(body);
+      item.appendChild(details);
+      messages.appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
     function asObject(value) {
       return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     }
@@ -1017,7 +1247,8 @@ function renderChatHtml(webview) {
       details.appendChild(input);
       item.appendChild(details);
       messages.appendChild(item);
-      lastToolCard = { name, details };
+      lastToolCard = { name, args, details };
+      currentToolCall = { name, args };
       window.scrollTo(0, document.body.scrollHeight);
     }
 
@@ -1027,9 +1258,9 @@ function renderChatHtml(webview) {
         addMessage('tool', 'Tool result: ' + name + ' ' + (ok ? 'ok' : 'error') + ' (' + String(content || '').length + ' chars)');
         return;
       }
-      const result = document.createElement('pre');
+      const result = document.createElement('div');
       result.className = 'tool-result';
-      result.textContent = (ok ? 'ok' : 'error') + '\\n' + previewText(content || '', 1200);
+      renderLinkedText(result, (ok ? 'ok' : 'error') + '\\n' + previewText(content || '', 1200));
       target.appendChild(result);
       target.querySelector('summary').textContent = 'Tool: ' + name + ' · ' + (ok ? 'ok' : 'error') + ' · ' + String(content || '').length + ' chars';
       window.scrollTo(0, document.body.scrollHeight);
@@ -1049,6 +1280,11 @@ function renderChatHtml(webview) {
       meta.className = 'approval-meta';
       meta.textContent = request.files && request.files.length ? 'Files: ' + request.files.join(', ') : 'Tool: ' + request.toolName;
       item.appendChild(meta);
+
+      const reason = document.createElement('div');
+      reason.className = 'approval-meta';
+      reason.textContent = approvalReason(request);
+      item.appendChild(reason);
 
       if (request.previewError) {
         const previewError = document.createElement('div');
@@ -1104,6 +1340,15 @@ function renderChatHtml(webview) {
       summary.appendChild(textSpan('+' + counts.added, 'added'));
       summary.appendChild(textSpan('-' + counts.deleted, 'deleted'));
       return summary;
+    }
+
+    function approvalReason(request) {
+      if (!request) return 'This action needs approval before it can continue.';
+      if (request.toolName === 'write_file') return 'Approval is required because this will write file contents.';
+      if (request.toolName === 'edit_file') return 'Approval is required because this will edit an existing file.';
+      if (request.toolName === 'run_command' || request.toolName === 'run_background_command') return 'Approval is required because shell commands can change your workspace.';
+      if (String(request.toolName || '').startsWith('mcp__')) return 'Approval is required before calling an external MCP tool.';
+      return 'Approval is required because this tool can change state or start another task.';
     }
 
     function createDiffReview(diffText, files) {
@@ -1252,7 +1497,7 @@ function renderChatHtml(webview) {
       if (extraClass) button.className = extraClass;
       button.addEventListener('click', () => {
         setApprovalButtonsDisabled(approvalId, true);
-        markApproval(approvalId, 'Submitting: ' + labelChoice(choice));
+        markApproval(approvalId, 'Submitting: ' + labelChoice(choice), false);
         vscode.postMessage({ type: 'approval', approvalId, choice });
       });
       return button;
@@ -1264,13 +1509,20 @@ function renderChatHtml(webview) {
       item.querySelectorAll('button').forEach(button => { button.disabled = disabled; });
     }
 
-    function markApproval(id, text) {
+    function markApproval(id, text, resolved = true) {
       const item = document.querySelector('[data-approval-id="' + id + '"]');
       if (!item) return;
-      item.classList.add('resolved');
+      if (resolved) item.classList.add('resolved');
       item.querySelectorAll('button').forEach(button => { button.disabled = true; });
       const status = item.querySelector('.approval-status');
       if (status) status.textContent = text;
+    }
+
+    function approvalResolvedText(choice) {
+      if (choice === 'reject_once') return 'Rejected. This run will stop.';
+      if (choice === 'allow_for_session') return 'Approved for this session. Running tool...';
+      if (choice === 'allow_once') return 'Approved once. Running tool...';
+      return 'Resolved: ' + labelChoice(choice);
     }
 
     function labelChoice(choice) {
@@ -1298,17 +1550,24 @@ function renderChatHtml(webview) {
     }
 
     function renderLinkedText(container, text) {
-      const pattern = new RegExp('((?:\\\\/|\\\\.\\\\/|\\\\.\\\\.\\\\/)?[A-Za-z0-9_@.\\\\/-]+\\\\.(?:ts|tsx|js|jsx|json|md|css|html|py|sh|yml|yaml))(?:[:#](\\\\d+))?', 'g');
+      const pathPattern = [
+        '((?:\\\\/|\\\\.\\\\/|\\\\.\\\\.\\\\/)?[A-Za-z0-9_@.\\\\/ -]+(?:',
+        '\\\\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|scss|less|html|py|sh|yml|yaml|toml|lock|rs|go|java|kt|swift|rb|php|c|h|cpp|hpp)',
+        '|(?:^|\\\\/)(?:Dockerfile|Makefile|README|LICENSE|package-lock\\\\.json|pnpm-lock\\\\.yaml|yarn\\\\.lock|tsconfig\\\\.json|vite\\\\.config\\\\.ts|next\\\\.config\\\\.js|\\\\.env(?:\\\\.[A-Za-z0-9_-]+)?))',
+        ')',
+      ].join('');
+      const pattern = new RegExp(pathPattern + '(?:[:#](\\\\d+))?(?::(\\\\d+))?', 'g');
       let lastIndex = 0;
       let match;
       while ((match = pattern.exec(text)) !== null) {
         if (match.index > lastIndex) container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
         const filePath = match[1];
         const line = match[2] ? Number(match[2]) : undefined;
+        const column = match[3] ? Number(match[3]) : undefined;
         const button = document.createElement('button');
         button.className = 'link-button';
         button.textContent = match[0];
-        button.addEventListener('click', () => vscode.postMessage({ type: 'openFile', filePath, line }));
+        button.addEventListener('click', () => vscode.postMessage({ type: 'openFile', filePath, line, column }));
         container.appendChild(button);
         lastIndex = pattern.lastIndex;
       }
