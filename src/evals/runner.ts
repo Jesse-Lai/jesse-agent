@@ -504,6 +504,11 @@ async function runImplementationTraceGuidanceEval(): Promise<EvalResult> {
       prompt.includes('.jesse/tool-results') &&
       prompt.includes('.jesse/task-output')
     ), extractPromptSection(prompt, '# 实现追踪'))
+    check(checks, 'trace guidance treats docs as hints and source as authoritative', (
+      prompt.includes('文档、README、PLAN、memory 可以作为线索') &&
+      prompt.includes('源码是最终依据') &&
+      prompt.includes('必须回到源码验证')
+    ), extractPromptSection(prompt, '# 实现追踪'))
     check(checks, 'trace guidance has convergence rule', prompt.includes('连续两次搜索没有带来新文件或新函数时'), extractPromptSection(prompt, '# 实现追踪'))
   })
 }
