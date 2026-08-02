@@ -118,21 +118,21 @@ async function reviewChanges(context) {
 }
 
 async function selectWorkspace(context) {
-  const folders = vscode.workspace.workspaceFolders || []
-  if (folders.length === 0) {
+  const options = workspaceOptions()
+  if (options.length === 0) {
     vscode.window.showInformationMessage('Open a workspace folder first.')
     return
   }
 
-  if (folders.length === 1) {
-    selectedWorkspaceRoot = folders[0].uri.fsPath
+  if (options.length === 1) {
+    selectedWorkspaceRoot = options[0].path
   } else {
     const picked = await vscode.window.showQuickPick(
-      folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, folder })),
+      options.map(option => ({ label: option.name, description: option.description || option.path, option })),
       { title: 'Select Jesse Agent workspace' },
     )
     if (!picked) return
-    selectedWorkspaceRoot = picked.folder.uri.fsPath
+    selectedWorkspaceRoot = picked.option.path
   }
 
   currentSessionId = null
@@ -142,7 +142,7 @@ async function selectWorkspace(context) {
 }
 
 function syncWorkspaceState(label) {
-  if (!selectedWorkspaceRoot || !workspaceFolders().some(folder => folder.uri.fsPath === selectedWorkspaceRoot)) {
+  if (!selectedWorkspaceRoot || !isKnownWorkspaceRoot(selectedWorkspaceRoot)) {
     selectedWorkspaceRoot = null
   }
   chatPanel?.webview.postMessage(serverStatePayload())
@@ -263,7 +263,6 @@ async function runPromptFromEditor(context, prompt, options) {
       prompt,
       context: editorContext,
       permissionMode: getPermissionMode(),
-      maxTurns: 8,
       sessionId: currentSessionId || undefined,
     }, output => {
       panel.webview.postMessage(output)
@@ -479,16 +478,25 @@ function resolveWorkspacePath(filePath) {
 }
 
 function activeWorkspaceRoot(filePath) {
-  const folders = workspaceFolders()
-  if (selectedWorkspaceRoot && folders.some(folder => folder.uri.fsPath === selectedWorkspaceRoot)) {
+  if (selectedWorkspaceRoot && isKnownWorkspaceRoot(selectedWorkspaceRoot)) {
     return selectedWorkspaceRoot
   }
   selectedWorkspaceRoot = null
+
+  const folders = workspaceFolders()
   if (filePath) {
     const owner = folders.find(folder => isPathInside(filePath, folder.uri.fsPath))
-    if (owner) return owner.uri.fsPath
+    if (owner) {
+      const fileProjectRoot = detectProjectRootForPath(filePath, owner.uri.fsPath)
+      if (fileProjectRoot) return fileProjectRoot
+      const ownerProjectRoot = detectProjectRoots(owner.uri.fsPath)[0]
+      if (ownerProjectRoot) return ownerProjectRoot
+      return owner.uri.fsPath
+    }
   }
-  return folders[0]?.uri.fsPath
+
+  const detected = detectedWorkspaceRoots()
+  return detected[0]?.path
 }
 
 function workspaceFolders() {
@@ -497,11 +505,81 @@ function workspaceFolders() {
 
 function workspaceOptions() {
   const selected = activeWorkspaceRoot()
-  return workspaceFolders().map(folder => ({
-    name: folder.name,
-    path: folder.uri.fsPath,
-    selected: folder.uri.fsPath === selected,
+  return detectedWorkspaceRoots().map(option => ({
+    ...option,
+    selected: option.path === selected,
   }))
+}
+
+function detectedWorkspaceRoots() {
+  const seen = new Set()
+  const roots = []
+  for (const folder of workspaceFolders()) {
+    const folderPath = folder.uri.fsPath
+    const projectRoots = detectProjectRoots(folderPath)
+    const candidates = projectRoots.length > 0
+      ? projectRoots.map(projectRoot => ({
+          name: path.basename(projectRoot),
+          path: projectRoot,
+          description: projectRoot === folderPath ? folderPath : `${projectRoot} (detected project)`,
+        }))
+      : [{ name: folder.name, path: folderPath, description: folderPath }]
+
+    for (const candidate of candidates) {
+      if (seen.has(candidate.path)) continue
+      seen.add(candidate.path)
+      roots.push(candidate)
+    }
+  }
+  return roots
+}
+
+function isKnownWorkspaceRoot(rootPath) {
+  return detectedWorkspaceRoots().some(option => option.path === rootPath)
+}
+
+function detectProjectRootForPath(filePath, workspaceRoot) {
+  let current = fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()
+    ? filePath
+    : path.dirname(filePath)
+  while (isPathInside(current, workspaceRoot)) {
+    if (hasIdeBridge(current)) return current
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return undefined
+}
+
+function detectProjectRoots(workspaceRoot) {
+  if (!workspaceRoot) return []
+  if (hasIdeBridge(workspaceRoot)) return [workspaceRoot]
+
+  const entries = safeReadDir(workspaceRoot)
+  const roots = []
+  for (const entry of entries) {
+    if (entry.startsWith('.')) continue
+    const fullPath = path.join(workspaceRoot, entry)
+    if (!safeIsDirectory(fullPath)) continue
+    if (hasIdeBridge(fullPath)) roots.push(fullPath)
+  }
+  return roots.sort()
+}
+
+function safeReadDir(dir) {
+  try {
+    return fs.readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
+function safeIsDirectory(candidate) {
+  try {
+    return fs.statSync(candidate).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function isPathInside(filePath, rootPath) {
@@ -946,7 +1024,7 @@ function renderChatHtml(webview, initialState = {}) {
   </div>
   <div class="workspace-strip">
     <div><strong>Workspace</strong>: <span id="workspace">${escapeHtml(initialWorkspace)}</span> <button id="workspace-change" class="link-button">Change</button></div>
-    <div><strong>Session</strong>: <span id="session">${escapeHtml(initialSession)}</span> · <strong>Status</strong>: <span id="run-status">idle</span> · <strong>UI</strong>: <span id="ui-status">html</span></div>
+    <div><strong>Session</strong>: <span id="session">${escapeHtml(initialSession)}</span> · <strong>Status</strong>: <span id="run-status">idle</span><span id="ui-debug" class="dev-only"> · <strong>UI</strong>: <span id="ui-status">html</span></span></div>
   </div>
   <div id="messages" class="messages"></div>
   <div class="composer">
@@ -956,6 +1034,8 @@ function renderChatHtml(webview, initialState = {}) {
     </div>
   </div>
   <script nonce="${nonce}">
+    const initialServerState = ${initialStateJson};
+    let debugUiEnabled = initialServerState.devMode === true;
     window.addEventListener('error', event => setUiStatus('script error: ' + event.message));
     window.addEventListener('unhandledrejection', event => setUiStatus('script error: ' + String(event.reason || event)));
     setUiStatus('script booting');
@@ -967,7 +1047,6 @@ function renderChatHtml(webview, initialState = {}) {
     const sessionLabel = document.getElementById('session');
     const runStatus = document.getElementById('run-status');
     const uiStatus = document.getElementById('ui-status');
-    const initialServerState = ${initialStateJson};
     let currentAssistant = null;
     let lastToolCard = null;
     let currentTimeline = null;
@@ -999,6 +1078,7 @@ function renderChatHtml(webview, initialState = {}) {
     }
 
     function setUiStatus(text) {
+      if (!debugUiEnabled) return;
       const target = document.getElementById('ui-status');
       if (target) target.textContent = text;
     }
@@ -1074,9 +1154,10 @@ function renderChatHtml(webview, initialState = {}) {
       if (message.workspaceRoot) workspaceLabel.textContent = message.workspaceRoot;
       if (message.cwd && !message.workspaceRoot) workspaceLabel.textContent = message.cwd;
       if (message.sessionId) sessionLabel.textContent = 'active' + (message.messageCount ? ' · ' + message.messageCount + ' messages' : '');
-      document.body.classList.toggle('dev', message.devMode === true);
+      debugUiEnabled = message.devMode === true;
+      document.body.classList.toggle('dev', debugUiEnabled);
       updateWorkspaceChangeVisibility(message.workspaceOptions || []);
-      setUiStatus('connected');
+      if (debugUiEnabled) setUiStatus('connected');
       if (isRunning && message.text) {
         const meta = [message.permissionMode, message.cwd || message.workspaceRoot].filter(Boolean).join(' · ');
         addTimelineEvent('running', 'Connected to local agent', meta || message.text);

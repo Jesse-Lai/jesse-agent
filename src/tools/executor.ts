@@ -24,7 +24,7 @@ import { checkPermission, describeRule, rememberSessionAllowRule } from '../perm
 import { isPathWithinProjectRoot, resolveWorkingDirectory } from '../workingDirectory.js'
 import { classifyBashCommand } from '../bashClassifier.js'
 import { getPermissionMode, permissionModeTitle } from '../permissionMode.js'
-import { buildToolApprovalRequest } from '../toolApprovals.js'
+import { buildToolApprovalRequest, type ToolApprovalRequest } from '../toolApprovals.js'
 
 /** 执行结果：成功带内容，失败带原因（都会被喂回给模型）。 */
 export interface ExecuteResult {
@@ -172,6 +172,17 @@ async function permission(
   // 只读工具无副作用，无需确认。
   if (tool.isReadOnly) return null
 
+  let detail = ''
+  let approvalRequest: ToolApprovalRequest | null = null
+
+  if (isFileEditTool(tool.name)) {
+    detail = describeDangerousAction(tool.name, args)
+    approvalRequest = await buildToolApprovalRequest(tool.name, args, detail, context)
+    if (approvalRequest.noChanges) {
+      return { ok: true, content: noChangesContent(tool.name, approvalRequest.files) }
+    }
+  }
+
   if (mode === 'acceptEdits' && isFileEditTool(tool.name)) {
     if (isPathWithinProjectRoot(args.path, context)) {
       console.log(`\n✅ ${permissionModeTitle(mode)} 模式：自动允许项目内文件编辑工具 ${tool.name}。`)
@@ -192,9 +203,9 @@ async function permission(
 
   // 危险工具：组织一句人类可读的动作说明，尽量展示"具体要干什么"。
   // run_command 展示命令本身；其他危险工具展示工具名 + 参数。
-  const detail = describeDangerousAction(tool.name, args)
+  if (!detail) detail = describeDangerousAction(tool.name, args)
 
-  const approvalRequest = await buildToolApprovalRequest(tool.name, args, detail, context)
+  if (!approvalRequest) approvalRequest = await buildToolApprovalRequest(tool.name, args, detail, context)
   const choice = context?.approvalHandler
     ? await context.approvalHandler(approvalRequest)
     : await confirm(detail)
@@ -235,6 +246,11 @@ function isFileEditTool(toolName: string): boolean {
 
 function isShellCommandTool(toolName: string): boolean {
   return toolName === 'run_command' || toolName === 'run_background_command'
+}
+
+function noChangesContent(toolName: string, files?: string[]): string {
+  const target = files && files.length > 0 ? `：${files.join(', ')}` : ''
+  return `没有实际改动${target}。已跳过 ${toolName}，未执行写入，也不需要审批。`
 }
 
 function describeDangerousAction(toolName: string, args: Record<string, unknown>): string {

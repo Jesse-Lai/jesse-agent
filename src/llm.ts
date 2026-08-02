@@ -507,9 +507,12 @@ type ResponsesInputItem =
   | { type: 'function_call_output'; call_id: string; output: string }
 
 interface ResponsesResponse {
+  id?: string
+  status?: string
   output_text?: string
   output?: ResponsesOutputItem[]
   error?: ResponsesError
+  incomplete_details?: unknown
 }
 
 type ResponsesOutputItem =
@@ -543,10 +546,34 @@ interface ResponsesError {
 function formatResponsesStreamError(event: ResponsesStreamEvent): string {
   const error = event.error ?? event.response?.error
   const message = event.message ?? error?.message ?? 'Responses API 流式事件返回错误'
-  const details = [error?.code, error?.type, error?.param]
+  const details = [
+    error?.code,
+    error?.type,
+    error?.param,
+    event.response?.status ? `status=${event.response.status}` : undefined,
+    event.response?.id ? `response_id=${event.response.id}` : undefined,
+    event.response?.incomplete_details ? `incomplete=${compactJson(event.response.incomplete_details, 400)}` : undefined,
+  ]
     .filter((part): part is string => Boolean(part))
     .join(' · ')
-  return details ? `${message} (${details})` : message
+  const hasSpecificMessage = Boolean(event.message || error?.message || error?.code || error?.type || error?.param)
+  const prefix = details ? `${message} (${details})` : message
+  return hasSpecificMessage ? prefix : `${prefix}: ${compactJson(event, 1_200)}`
+}
+
+function compactJson(value: unknown, maxChars: number): string {
+  try {
+    const text = JSON.stringify(value, redactSecretLikeFields)
+    if (!text) return String(value)
+    return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text
+  } catch {
+    return String(value)
+  }
+}
+
+function redactSecretLikeFields(key: string, value: unknown): unknown {
+  if (/api[-_]?key|authorization|token|secret|password/i.test(key)) return '[redacted]'
+  return value
 }
 
 /**

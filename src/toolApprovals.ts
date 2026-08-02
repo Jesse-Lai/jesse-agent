@@ -18,6 +18,7 @@ export interface ToolApprovalRequest {
   args: Record<string, unknown>
   files?: string[]
   diff?: string
+  noChanges?: boolean
   previewError?: string
 }
 
@@ -49,7 +50,7 @@ async function buildFileDiffPreview(
   toolName: string,
   args: Record<string, unknown>,
   context?: AgentRuntimeContext,
-): Promise<Pick<ToolApprovalRequest, 'files' | 'diff' | 'previewError'>> {
+): Promise<Pick<ToolApprovalRequest, 'files' | 'diff' | 'noChanges' | 'previewError'>> {
   const inputPath = String(args.path ?? '').trim()
   if (!inputPath) return { previewError: 'No file path was provided.' }
 
@@ -70,7 +71,11 @@ async function buildFileDiffPreview(
 
   if (toolName === 'write_file') {
     const next = String(args.content ?? '')
-    return { files, diff: createUnifiedDiff(displayPath, exists ? current : '', next) }
+    return {
+      files,
+      diff: createUnifiedDiff(displayPath, exists ? current : '', next),
+      noChanges: exists && current === next,
+    }
   }
 
   const oldString = String(args.old_string ?? '')
@@ -85,7 +90,7 @@ async function buildFileDiffPreview(
   }
 
   const next = replaceAll ? current.replaceAll(oldString, newString) : current.replace(oldString, newString)
-  return { files, diff: createUnifiedDiff(displayPath, current, next) }
+  return { files, diff: createUnifiedDiff(displayPath, current, next), noChanges: current === next }
 }
 
 function previewArgs(args: Record<string, unknown>): Record<string, unknown> {

@@ -63,6 +63,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runReadBeforeWriteEval,
     runReadEditVerifyEval,
     runIdeApprovalAllowsEditEval,
+    runIdeApprovalSkipsNoopEditEval,
     runIdeApprovalRejectsEditEval,
     runIdeApprovalRejectStopsRunEval,
     runAgentWorktreeIsolationEval,
@@ -74,8 +75,10 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runSearchFallbackEval,
     runReadFileRangeEval,
     runImplementationTraceGuidanceEval,
+    runAgentLoopOptionalMaxTurnsEval,
     runResponsesStreamErrorSurfaceEval,
     runIdeTimelineUiEval,
+    runVsCodeWorkspaceDetectionEval,
     runVsCodePackagingConfigEval,
   ]
 
@@ -219,6 +222,39 @@ async function runIdeApprovalAllowsEditEval(): Promise<EvalResult> {
     check(checks, 'approval diff shows old and new lines', diff.includes('-  return a - b') && diff.includes('+  return a + b'), diff)
     check(checks, 'allow approval lets edit_file execute', result.ok === true && result.content.includes('编辑文件成功'), result.content)
     check(checks, 'file was changed after approval', content.includes('return a + b'))
+  }, root)
+}
+
+async function runIdeApprovalSkipsNoopEditEval(): Promise<EvalResult> {
+  const root = await createMathProject('ide-approval-skip-noop-edit')
+
+  return runCase('ide-approval-skips-noop-edit', async checks => {
+    await setProjectRoot(root)
+    setPermissionMode('default')
+
+    const approvalRequests: Array<{ diff?: string; toolName: string }> = []
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-ide-approval-skip-noop',
+      projectRoot: root,
+      cwd: root,
+      originalProjectRoot: root,
+      approvalHandler: async request => {
+        approvalRequests.push({ diff: request.diff, toolName: request.toolName })
+        return 'allow_once'
+      },
+    })
+
+    await readFileTool.execute({ path: 'src/math.js' }, context)
+    const result = await executeTool('edit_file', {
+      path: 'src/math.js',
+      old_string: 'return a - b',
+      new_string: 'return a - b',
+    }, { tools: EVAL_TOOLS, context })
+    const content = await readFile(join(root, 'src/math.js'), 'utf8')
+
+    check(checks, 'noop edit did not ask for approval', approvalRequests.length === 0, JSON.stringify(approvalRequests))
+    check(checks, 'noop edit returns a skipped result', result.ok === true && result.content.includes('没有实际改动') && result.content.includes('不需要审批'), result.content)
+    check(checks, 'file stayed unchanged after noop edit', content.includes('return a - b') && !content.includes('return a + b'), content)
   }, root)
 }
 
@@ -680,6 +716,7 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
     ))
     check(checks, 'top session label hides raw session id', source.includes("sessionLabel.textContent = 'active'"))
     check(checks, 'workspace selector is available', source.includes('selectWorkspace') && source.includes('workspaceOptions'))
+    check(checks, 'ide normal chat does not hardcode maxTurns', !source.includes('IDE_MAX_TURNS') && !source.includes('maxTurns: IDE_MAX_TURNS'))
     check(checks, 'dev controls are hidden behind dev mode', source.includes('dev-only') && source.includes("message.devMode === true"))
     check(checks, 'changed files summary exists', source.includes('Files changed in this run') && source.includes('recordChangedFileFromTool'))
     check(checks, 'tool results use linked text renderer', source.includes('renderLinkedText(result') && source.includes('Dockerfile'))
@@ -691,9 +728,38 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
     check(checks, 'webview retries ready handshake', source.includes('setTimeout(postReady, 100)') && source.includes('setTimeout(postReady, 500)'))
     check(checks, 'webview embeds initial server state in html', source.includes('initialServerState') && source.includes('serverStatePayload()'))
     check(checks, 'webview exposes ui bootstrap status', source.includes('ui-status') && source.includes("'script booting'") && source.includes("'script ready'") && source.includes("'connected'"))
+    check(checks, 'webview hides ui bootstrap status behind dev mode', source.includes('id="ui-debug" class="dev-only"') && source.includes('id="ui-status"'))
+    check(checks, 'webview html template does not reference browser-only initialServerState', !source.includes('${initialServerState.devMode'))
     check(checks, 'webview surfaces script errors in ui', source.includes("'script error: '") && source.includes('unhandledrejection'))
     check(checks, 'assistant replies use markdown renderer', source.includes('renderAssistantMarkdown(body') && source.includes('finalizeAssistantLinks'))
   })
+}
+
+async function runVsCodeWorkspaceDetectionEval(): Promise<EvalResult> {
+  const root = await mkdtemp(join(tmpdir(), 'jesse-eval-vscode-workspace-detect-'))
+
+  return runCase('vscode-workspace-detection', async checks => {
+    const projectRoot = join(root, 'jesse-agent')
+    await mkdir(join(projectRoot, 'src'), { recursive: true })
+    await mkdir(join(projectRoot, 'vscode-extension'), { recursive: true })
+    await writeFile(join(projectRoot, 'package.json'), '{"name":"jesse-agent"}\n')
+    await writeFile(join(projectRoot, 'src', 'ideBridge.ts'), 'export {}\n')
+    await writeFile(join(projectRoot, 'vscode-extension', 'extension.js'), '// active file\n')
+
+    const internals = await loadVsCodeExtensionInternals([
+      { name: 'JesseAgent', uri: { fsPath: root } },
+    ])
+    const activeWorkspaceRoot = internals.__activeWorkspaceRoot as (filePath?: string) => string | undefined
+    const workspaceOptions = internals.__workspaceOptions as () => Array<{ name: string; path: string; selected?: boolean }>
+
+    const activeRoot = activeWorkspaceRoot()
+    const activeFileRoot = activeWorkspaceRoot(join(projectRoot, 'vscode-extension', 'extension.js'))
+    const options = workspaceOptions()
+
+    check(checks, 'parent workspace auto-detects child Jesse Agent project', activeRoot === projectRoot, activeRoot)
+    check(checks, 'active file resolves to child project root', activeFileRoot === projectRoot, activeFileRoot)
+    check(checks, 'workspace options expose detected project root', options.length === 1 && options[0]?.path === projectRoot && options[0]?.selected === true, JSON.stringify(options))
+  }, root)
 }
 
 async function runResponsesStreamErrorSurfaceEval(): Promise<EvalResult> {
@@ -703,6 +769,17 @@ async function runResponsesStreamErrorSurfaceEval(): Promise<EvalResult> {
     check(checks, 'stream parser handles response.failed events', source.includes("event.type === 'response.failed'"))
     check(checks, 'stream parser reads nested error.message', source.includes('event.response?.error') && source.includes('error?.message'))
     check(checks, 'stream parser preserves error details', source.includes('error?.code') && source.includes('error?.type') && source.includes('error?.param'))
+    check(checks, 'stream parser falls back to compact raw event details', source.includes('compactJson(event, 1_200)') && source.includes('redactSecretLikeFields'))
+  })
+}
+
+async function runAgentLoopOptionalMaxTurnsEval(): Promise<EvalResult> {
+  return runCase('agent-loop-optional-max-turns', async checks => {
+    const source = await readFile(join(getOriginalProjectRoot(), 'src', 'loop.ts'), 'utf8')
+
+    check(checks, 'agent loop does not set a default maxTurns', source.includes('const maxTurns = options.maxTurns') && !source.includes('const MAX_TURNS'))
+    check(checks, 'agent loop only applies maxTurns when explicitly provided', source.includes('maxTurns === undefined || turn < maxTurns'))
+    check(checks, 'agent loop still emits max_turns when explicit limit is reached', source.includes("type: 'max_turns'"))
   })
 }
 
@@ -922,6 +999,44 @@ function extractGeneratedWebviewScript(source: string): string {
   const html = renderChatHtml({ cspSource: 'vscode-resource:' }, { workspaceRoot: '/tmp/workspace', workspaceOptions: [] })
   const match = /<script[^>]*>([\s\S]*?)<\/script>/.exec(String(html))
   return match?.[1] ?? ''
+}
+
+async function loadVsCodeExtensionInternals(workspaceFolders: unknown[]): Promise<Record<string, unknown>> {
+  const source = await readFile(join(getOriginalProjectRoot(), 'vscode-extension', 'extension.js'), 'utf8')
+  const moduleObj = { exports: {} as Record<string, unknown> }
+  const requireFromHere = createRequire(import.meta.url)
+  const fakeVscode = {
+    workspace: {
+      workspaceFolders,
+      getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
+      onDidChangeWorkspaceFolders: () => ({ dispose() {} }),
+      openTextDocument: async () => ({}),
+    },
+    window: {
+      onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+      createWebviewPanel: () => ({}),
+      showInformationMessage: () => undefined,
+      showQuickPick: async () => undefined,
+      showErrorMessage: () => undefined,
+    },
+    commands: { registerCommand: () => ({ dispose() {} }) },
+    Uri: { file: (fsPath: string) => ({ fsPath }) },
+    Position: class {},
+    Selection: class {},
+    Range: class {},
+    TextEditorRevealType: { InCenter: 1 },
+    languages: { getDiagnostics: () => [] },
+    ViewColumn: { Beside: 2 },
+  }
+  const fakeRequire = (name: string): unknown => name === 'vscode' ? fakeVscode : requireFromHere(name)
+  const load = new Function(
+    'require',
+    'module',
+    'exports',
+    `${source}\nmodule.exports.__activeWorkspaceRoot = activeWorkspaceRoot; module.exports.__workspaceOptions = workspaceOptions;`,
+  )
+  load(fakeRequire, moduleObj, moduleObj.exports)
+  return moduleObj.exports
 }
 
 function parsesAsScript(source: string): boolean {

@@ -19,9 +19,6 @@ import { executeTool } from './tools/executor.js'
 import { toOpenAITools, type Tool } from './types.js'
 import { createAgentRuntimeContext, type AgentRuntimeContext } from './runtimeContext.js'
 
-// 最大轮次保护：防止模型无限调工具、永不收尾（死循环）。
-const MAX_TURNS = 10
-
 export interface RunAgentOptions {
   tools?: Tool[]
   maxTurns?: number
@@ -58,14 +55,14 @@ export async function* runAgent(
   options: RunAgentOptions = {},
 ): AsyncGenerator<AgentEvent, void, void> {
   const availableTools = options.tools ?? getAllTools()
-  const maxTurns = options.maxTurns ?? MAX_TURNS
+  const maxTurns = options.maxTurns
   const llmStream = options.llmStream ?? streamLLM
   const runtimeContext = options.context ?? createAgentRuntimeContext()
   // 把我们的工具转成 OpenAI 格式，随每次请求发给模型，让它知道有哪些工具可用。
   const tools = toOpenAITools(availableTools)
 
-  // 轮次计数：每问一次模型算一轮。
-  for (let turn = 0; turn < maxTurns; turn++) {
+  // 轮次计数：每问一次模型算一轮。maxTurns 只有调用方明确传入时才启用。
+  for (let turn = 0; maxTurns === undefined || turn < maxTurns; turn++) {
     if (options.signal?.aborted) {
       yield { type: 'error', reason: 'Agent run was cancelled.' }
       return
@@ -168,6 +165,6 @@ export async function* runAgent(
     // 模型这次能看到工具结果，据此决定：给最终答案，还是继续调工具。
   }
 
-  // 循环跑满 MAX_TURNS 还没结束 → 强制收尾。
+  // 循环跑满调用方显式设置的 maxTurns 还没结束 → 强制收尾。
   yield { type: 'max_turns' } // ← 出口2：强制结束
 }
