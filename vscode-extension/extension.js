@@ -846,6 +846,7 @@ function mapBridgeOutput(output) {
       workspaceRoot: output.workspaceRoot,
       cwd: output.cwd,
       permissionMode: output.permissionMode,
+      autoCompact: output.autoCompact,
     }
   }
   if (output.type === 'approval_request') return { type: 'approvalRequest', request: output.request }
@@ -1056,6 +1057,7 @@ function renderChatHtml(webview, initialState = {}) {
 
     setUiStatus('script ready');
     updateServerState(initialServerState);
+    queueMicrotask(focusPrompt);
 
     askButton.addEventListener('click', () => isRunning ? vscode.postMessage({ type: 'cancel' }) : ask());
     document.getElementById('new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
@@ -1083,12 +1085,19 @@ function renderChatHtml(webview, initialState = {}) {
       if (target) target.textContent = text;
     }
 
+    function focusPrompt() {
+      if (prompt.disabled) return;
+      prompt.focus();
+      prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+    }
+
     function ask() {
       const text = prompt.value.trim();
       if (!text) return;
       prompt.value = '';
       currentAssistant = null;
       vscode.postMessage({ type: 'ask', prompt: text });
+      queueMicrotask(focusPrompt);
     }
 
     window.addEventListener('message', event => {
@@ -1117,7 +1126,7 @@ function renderChatHtml(webview, initialState = {}) {
         addToolStart(message.name, message.args);
       }
       if (message.type === 'toolResult') {
-        recordChangedFileFromTool(message.name, message.ok);
+        recordChangedFileFromTool(message.name, message.ok, message.content);
         addTimelineEvent(message.ok ? 'done' : 'error', message.ok ? 'Tool finished' : 'Tool failed', summarizeToolResult(message.name, message.ok, message.content));
         addToolResult(message.name, message.ok, message.content);
       }
@@ -1162,6 +1171,17 @@ function renderChatHtml(webview, initialState = {}) {
         const meta = [message.permissionMode, message.cwd || message.workspaceRoot].filter(Boolean).join(' · ');
         addTimelineEvent('running', 'Connected to local agent', meta || message.text);
       }
+      if (isRunning && message.autoCompact) {
+        addTimelineEvent('thinking', 'Context summarized automatically', summarizeAutoCompact(message.autoCompact));
+      }
+    }
+
+    function summarizeAutoCompact(compact) {
+      const before = Number(compact.beforeMessageCount || 0);
+      const after = Number(compact.afterMessageCount || 0);
+      const compacted = Number(compact.compactedMessageCount || 0);
+      const kept = Number(compact.keptRecentMessages || 0);
+      return compacted + ' older messages summarized · ' + before + ' → ' + after + ' messages · kept latest ' + kept;
     }
 
     function setRunState(state) {
@@ -1171,6 +1191,11 @@ function renderChatHtml(webview, initialState = {}) {
       askButton.textContent = isRunning ? 'Stop' : 'Ask';
       askButton.classList.toggle('stop', isRunning);
       prompt.disabled = isRunning;
+      if (isRunning) {
+        prompt.blur();
+      } else {
+        queueMicrotask(focusPrompt);
+      }
       if (!wasRunning && isRunning) {
         currentToolCall = null;
         currentRunChangedFiles = new Map();
@@ -1314,13 +1339,19 @@ function renderChatHtml(webview, initialState = {}) {
       return name + ' · ' + (ok ? 'ok' : 'error') + ' · ' + size + ' chars';
     }
 
-    function recordChangedFileFromTool(name, ok) {
+    function recordChangedFileFromTool(name, ok, content) {
       if (!ok || !currentToolCall || currentToolCall.name !== name) return;
       if (name !== 'write_file' && name !== 'edit_file') return;
+      if (isNoChangeToolResult(content)) return;
       const input = asObject(currentToolCall.args);
       const filePath = stringValue(input.path, '');
       if (!filePath) return;
       currentRunChangedFiles.set(filePath, name);
+    }
+
+    function isNoChangeToolResult(content) {
+      const text = String(content || '').toLowerCase();
+      return text.includes('没有实际改动') || text.includes('no actual change') || text.includes('no content changes') || text.includes('已跳过');
     }
 
     function addChangedFilesSummary() {

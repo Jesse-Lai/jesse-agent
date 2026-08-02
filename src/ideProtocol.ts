@@ -43,8 +43,15 @@ export interface IdeApprovalRequest extends ToolApprovalRequest {
   id: string
 }
 
+export interface IdeAutoCompactSummary {
+  beforeMessageCount: number
+  afterMessageCount: number
+  compactedMessageCount: number
+  keptRecentMessages: number
+}
+
 export type IdeBridgeOutput =
-  | { type: 'ready'; workspaceRoot?: string; cwd?: string; sessionId?: string; messageCount?: number; permissionMode: PermissionMode }
+  | { type: 'ready'; workspaceRoot?: string; cwd?: string; sessionId?: string; messageCount?: number; permissionMode: PermissionMode; autoCompact?: IdeAutoCompactSummary }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'approval_request'; request: IdeApprovalRequest }
   | { type: 'approval_response'; id: string; choice: ConfirmChoice }

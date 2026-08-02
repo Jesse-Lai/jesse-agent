@@ -30,7 +30,7 @@ export const runCommandTool: Tool = {
   description:
     '在 shell 中执行一条命令，返回标准输出和标准错误。参数 command 传要执行的命令字符串。 ' +
     '可选参数 cwd 指定执行目录，必须位于项目目录内，默认是项目根目录。 ' +
-    '适合运行如 ls、cat、git status、npm test 等命令。注意：这会真实地在系统上执行命令。',
+    '适合运行构建、测试、git status/git diff 等确实需要 shell 的命令。读取明确文件请优先用 read_file，不要用 cat/head/tail 代替。注意：这会真实地在系统上执行命令。',
 
   parameters: {
     type: 'object',

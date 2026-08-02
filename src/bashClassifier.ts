@@ -46,6 +46,7 @@ export function classifyBashCommand(command: string): BashCommandClassification 
   if (isPwd(program, args)) return readOnly('pwd 只读取当前目录。')
   if (isEnvironmentProbe(program, args)) return readOnly(`${program} 是只读环境检查。`)
   if (isLs(program, args)) return readOnly('ls 只列出目录内容。')
+  if (isFileRead(program, args)) return readOnly(`${program} 只读取项目内相对路径文件。`)
   if (isGitReadOnly(program, args)) return readOnly(`git ${args[0]} 被归类为只读 Git 查询。`)
 
   return needsApproval('不是保守白名单里的只读命令。')
@@ -71,6 +72,49 @@ function isLs(program: string, args: string[]): boolean {
     if (arg.startsWith('-')) return /^-[A-Za-z1CFLRTabcdfghiklmnopqrstuvwx]+$/.test(arg)
     return isSafeRelativePath(arg)
   })
+}
+
+function isFileRead(program: string, args: string[]): boolean {
+  switch (program) {
+    case 'cat':
+      return args.length > 0 && args.every(arg => {
+        if (arg.startsWith('-')) return /^-[benstuvAET]+$/.test(arg)
+        return isSafeRelativePath(arg)
+      })
+    case 'head':
+    case 'tail':
+      return args.length > 0 && allHeadTailArgsReadOnly(args)
+    case 'wc':
+      return args.length > 0 && args.every(arg => {
+        if (arg.startsWith('-')) return /^-[clmwL]+$/.test(arg)
+        return isSafeRelativePath(arg)
+      })
+    default:
+      return false
+  }
+}
+
+function allHeadTailArgsReadOnly(args: string[]): boolean {
+  let sawPath = false
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+    if (!arg) return false
+
+    if (arg === '-n' || arg === '-c') {
+      const value = args[index + 1]
+      if (!value || !/^\d+$/.test(value)) return false
+      index += 1
+      continue
+    }
+
+    if (/^-[nc]\d+$/.test(arg)) continue
+    if (arg.startsWith('-')) return false
+    if (!isSafeRelativePath(arg)) return false
+    sawPath = true
+  }
+
+  return sawPath
 }
 
 function isGitReadOnly(program: string, args: string[]): boolean {

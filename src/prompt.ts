@@ -62,10 +62,12 @@ function actionsSection(): string {
 function toolsSection(): string {
   return `# 工具使用
 - 需要查看文件内容或目录时，优先用 read_file / list_files；读取大文件时先用 grep_code 定位，或用 read_file 的 start_line/max_lines 读取局部片段。
+- 读取一个明确文件时用 read_file，不要用 run_command 执行 cat/head/tail 来代替；这些 shell 读文件命令只作为用户明确要求或专用工具不够用时的兜底。
 - 需要按文件名或路径模式找文件时，优先用 glob_files，例如找 src/**/*.ts。
 - 需要在代码内容里搜索函数名、错误信息或文本片段时，优先用 grep_code；不要用 run_command 去执行 grep 或 rg。
 - 需要写文件时，用 write_file；需要局部替换时，用 edit_file。不要用 run_command 配合 echo/cat/sed 来改文件。
 - run_command 只留给真正需要 shell 的操作，别拿它去做已有专用工具能做的事。
+- 如果 write_file / edit_file 返回“没有实际改动”或 no-op，说明文件内容没变；最终回复要说“无需修改/没有改动”，不要把它算作已完成的代码修改。
 - run_command 的 cwd 参数表示命令执行目录，默认是项目根目录；需要在子目录运行命令时传 cwd，不要用 cd ... && ...。
 - 预计很快完成的 shell 命令用 run_command；可能运行较久的测试、构建或调查用 run_background_command，让主对话保持响应。
 - 后台任务启动后会返回 task_id；用 task_list 查看任务，用 task_output 读取输出或等待完成，用 task_stop 停止不需要的任务。

@@ -39,6 +39,11 @@ export interface ExecuteToolOptions {
   context?: AgentRuntimeContext
 }
 
+interface PermissionOutcome {
+  result: ExecuteResult | null
+  toolResultPrefix?: string
+}
+
 // ============================================================================
 // 三步管线的每一步
 // ============================================================================
@@ -157,20 +162,20 @@ async function permission(
   tool: Tool,
   args: Record<string, unknown>,
   context?: AgentRuntimeContext,
-): Promise<ExecuteResult | null> {
+): Promise<PermissionOutcome> {
   const mode = getPermissionMode()
 
   if (mode === 'bypassPermissions') {
     console.log(`\n⚠️  ${permissionModeTitle(mode)} 模式：跳过权限确认。`)
-    return null
+    return continueWithoutPermissionNote()
   }
 
   if (mode === 'plan') {
-    return permissionInPlanMode(tool, args)
+    return resultFromPermissionCheck(permissionInPlanMode(tool, args))
   }
 
   // 只读工具无副作用，无需确认。
-  if (tool.isReadOnly) return null
+  if (tool.isReadOnly) return continueWithoutPermissionNote()
 
   let detail = ''
   let approvalRequest: ToolApprovalRequest | null = null
@@ -179,14 +184,14 @@ async function permission(
     detail = describeDangerousAction(tool.name, args)
     approvalRequest = await buildToolApprovalRequest(tool.name, args, detail, context)
     if (approvalRequest.noChanges) {
-      return { ok: true, content: noChangesContent(tool.name, approvalRequest.files) }
+      return resultFromPermissionCheck({ ok: true, content: noChangesContent(tool.name, approvalRequest.files) })
     }
   }
 
   if (mode === 'acceptEdits' && isFileEditTool(tool.name)) {
     if (isPathWithinProjectRoot(args.path, context)) {
       console.log(`\n✅ ${permissionModeTitle(mode)} 模式：自动允许项目内文件编辑工具 ${tool.name}。`)
-      return null
+      return continueWithoutPermissionNote()
     }
     console.log(`\n⚠️  ${permissionModeTitle(mode)} 模式不会自动允许项目外文件编辑，改走正常确认。`)
   }
@@ -194,11 +199,11 @@ async function permission(
   const decision = checkPermission(tool.name, args)
   if (decision.behavior === 'allow') {
     if (decision.reason) console.log(`\n✅ ${decision.reason}`)
-    return null
+    return continueWithoutPermissionNote()
   }
 
   if (decision.behavior === 'deny') {
-    return { ok: false, content: `权限系统拒绝了此操作：${decision.reason ?? '命中 deny 规则。'}` }
+    return resultFromPermissionCheck({ ok: false, content: `权限系统拒绝了此操作：${decision.reason ?? '命中 deny 规则。'}` })
   }
 
   // 危险工具：组织一句人类可读的动作说明，尽量展示"具体要干什么"。
@@ -209,16 +214,37 @@ async function permission(
   const choice = context?.approvalHandler
     ? await context.approvalHandler(approvalRequest)
     : await confirm(detail)
-  if (choice === 'allow_once') return null // 用户同意一次 → 继续执行
+  if (choice === 'allow_once') {
+    return continueWithApprovalNote(tool.name, 'allow_once')
+  }
 
   if (choice === 'allow_for_session') {
     const rule = rememberSessionAllowRule(tool.name, args)
     console.log(`✅ 已记住本次会话规则：${describeRule(rule)}`)
-    return null
+    return continueWithApprovalNote(tool.name, 'allow_for_session')
   }
 
   // 用户拒绝 → 中止当前 agent run，避免模型下一轮重复请求同一个危险操作。
-  return { ok: false, content: '用户拒绝了此操作，已停止当前运行。', stop: true }
+  return resultFromPermissionCheck({ ok: false, content: '用户拒绝了此操作，已停止当前运行。', stop: true })
+}
+
+function continueWithoutPermissionNote(): PermissionOutcome {
+  return { result: null }
+}
+
+function continueWithApprovalNote(toolName: string, choice: 'allow_once' | 'allow_for_session'): PermissionOutcome {
+  const choiceText = choice === 'allow_once' ? 'allow once' : 'allow for session'
+  return {
+    result: null,
+    toolResultPrefix: [
+      '[Permission]',
+      `This ${toolName} call required user approval. The user selected: ${choiceText}.`,
+    ].join('\n'),
+  }
+}
+
+function resultFromPermissionCheck(result: ExecuteResult | null): PermissionOutcome {
+  return { result }
 }
 
 function permissionInPlanMode(tool: Tool, args: Record<string, unknown>): ExecuteResult | null {
@@ -342,9 +368,11 @@ async function call(
   tool: Tool,
   args: Record<string, unknown>,
   context?: AgentRuntimeContext,
+  prefix?: string,
 ): Promise<ExecuteResult> {
   const content = await tool.execute(args, context)
-  return { ok: true, content: await budgetToolResult(tool.name, content) }
+  const budgeted = await budgetToolResult(tool.name, content)
+  return { ok: true, content: prefix ? `${prefix}\n\n[Tool output]\n${budgeted}` : budgeted }
 }
 
 // ============================================================================
@@ -380,11 +408,11 @@ export async function executeTool(
     if (validateResult) return validateResult
 
     // 第 2 步：权限。
-    const permissionResult = await permission(tool, args, options.context)
-    if (permissionResult) return permissionResult
+    const permissionOutcome = await permission(tool, args, options.context)
+    if (permissionOutcome.result) return permissionOutcome.result
 
     // 第 3 步：执行。
-    return await call(tool, args, options.context)
+    return await call(tool, args, options.context, permissionOutcome.toolResultPrefix)
   } catch (err) {
     return {
       ok: false,

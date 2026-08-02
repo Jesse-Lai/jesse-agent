@@ -35,6 +35,7 @@ import { continueAgentTask, readTaskOutput, startAgentTask } from '../tasks.js'
 import { createAgentRuntimeContext } from '../runtimeContext.js'
 import { buildSystemPrompt } from '../prompt.js'
 import { defaultRgIgnoreArgs, fallbackGlobFiles, fallbackGrepCode } from '../tools/searchFallback.js'
+import { classifyBashCommand } from '../bashClassifier.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
 const execFileAsync = promisify(execFile)
@@ -66,6 +67,8 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runIdeApprovalSkipsNoopEditEval,
     runIdeApprovalRejectsEditEval,
     runIdeApprovalRejectStopsRunEval,
+    runApprovalNoteInToolResultEval,
+    runBashReadOnlyClassifierEval,
     runAgentWorktreeIsolationEval,
     runBackgroundAgentTaskEval,
     runPerAgentRuntimeContextEval,
@@ -78,6 +81,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runAgentLoopOptionalMaxTurnsEval,
     runResponsesStreamErrorSurfaceEval,
     runIdeTimelineUiEval,
+    runIdeAutoCompactEventEval,
     runVsCodeWorkspaceDetectionEval,
     runVsCodePackagingConfigEval,
   ]
@@ -360,6 +364,53 @@ async function runIdeApprovalRejectStopsRunEval(): Promise<EvalResult> {
     check(checks, 'file stayed unchanged after stopped run', content.includes('return a - b') && !content.includes('return a + b'), content)
   }, root)
 }
+
+async function runApprovalNoteInToolResultEval(): Promise<EvalResult> {
+  const root = await mkdtemp(join(tmpdir(), 'jesse-eval-approval-note-'))
+  const realRoot = await realpath(root)
+
+  return runCase('approval-note-in-tool-result', async checks => {
+    await setProjectRoot(realRoot)
+    setPermissionMode('default')
+
+    const approvalRequests: string[] = []
+    const context = createAgentRuntimeContext({
+      agentId: 'eval-approval-note',
+      projectRoot: realRoot,
+      cwd: realRoot,
+      originalProjectRoot: realRoot,
+      approvalHandler: async request => {
+        approvalRequests.push(request.toolName)
+        return 'allow_once'
+      },
+    })
+
+    const result = await executeTool('run_command', { command: 'printf approval-note-ok', cwd: '.' }, {
+      tools: [runCommandTool],
+      context,
+    })
+
+    check(checks, 'approval handler was called for run_command', approvalRequests.join(',') === 'run_command', JSON.stringify(approvalRequests))
+    check(checks, 'tool result tells model approval was required', result.content.includes('[Permission]') && result.content.includes('required user approval'), result.content)
+    check(checks, 'tool result preserves command output', result.content.includes('[Tool output]') && result.content.includes('approval-note-ok'), result.content)
+  }, root)
+}
+
+async function runBashReadOnlyClassifierEval(): Promise<EvalResult> {
+  return runCase('bash-read-only-classifier', async checks => {
+    const runCommandSource = await readFile(join(getOriginalProjectRoot(), 'src', 'tools', 'runCommand.ts'), 'utf8')
+
+    check(checks, 'cat package.json is classified read-only', classifyBashCommand('cat package.json').risk === 'read_only')
+    check(checks, 'head with safe file is classified read-only', classifyBashCommand('head -n 20 src/index.ts').risk === 'read_only')
+    check(checks, 'tail with compact count flag is classified read-only', classifyBashCommand('tail -n20 src/index.ts').risk === 'read_only')
+    check(checks, 'wc with safe file is classified read-only', classifyBashCommand('wc -l package.json').risk === 'read_only')
+    check(checks, 'head without a file still needs approval', classifyBashCommand('head -n 20').risk === 'needs_approval')
+    check(checks, 'redirection still needs approval', classifyBashCommand('cat package.json > out.txt').risk === 'needs_approval')
+    check(checks, 'absolute paths still need approval', classifyBashCommand('cat /etc/passwd').risk === 'needs_approval')
+    check(checks, 'run_command description nudges file reads to read_file', runCommandSource.includes('读取明确文件请优先用 read_file'), runCommandSource)
+  })
+}
+
 async function runAgentWorktreeIsolationEval(): Promise<EvalResult> {
   const root = await createGitProject('agent-worktree-isolation')
 
@@ -692,6 +743,15 @@ async function runImplementationTraceGuidanceEval(): Promise<EvalResult> {
       prompt.includes('必须回到源码验证')
     ), extractPromptSection(prompt, '# 实现追踪'))
     check(checks, 'trace guidance has convergence rule', prompt.includes('连续两次搜索没有带来新文件或新函数时'), extractPromptSection(prompt, '# 实现追踪'))
+    check(checks, 'prompt tells agent not to claim no-op edits as changes', (
+      prompt.includes('没有实际改动') &&
+      prompt.includes('no-op') &&
+      prompt.includes('不要把它算作已完成的代码修改')
+    ), extractPromptSection(prompt, '# 工具使用'))
+    check(checks, 'prompt prefers read_file over shell file reads', (
+      prompt.includes('读取一个明确文件时用 read_file') &&
+      prompt.includes('不要用 run_command 执行 cat/head/tail')
+    ), extractPromptSection(prompt, '# 工具使用'))
   })
 }
 
@@ -719,6 +779,8 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
     check(checks, 'ide normal chat does not hardcode maxTurns', !source.includes('IDE_MAX_TURNS') && !source.includes('maxTurns: IDE_MAX_TURNS'))
     check(checks, 'dev controls are hidden behind dev mode', source.includes('dev-only') && source.includes("message.devMode === true"))
     check(checks, 'changed files summary exists', source.includes('Files changed in this run') && source.includes('recordChangedFileFromTool'))
+    check(checks, 'changed files summary ignores no-op edits', source.includes('isNoChangeToolResult') && source.includes('recordChangedFileFromTool(message.name, message.ok, message.content)'))
+    check(checks, 'timeline records automatic compaction', source.includes('Context summarized automatically') && source.includes('summarizeAutoCompact'))
     check(checks, 'tool results use linked text renderer', source.includes('renderLinkedText(result') && source.includes('Dockerfile'))
     check(checks, 'webview sends ready handshake for workspace state', source.includes("type: 'ready'") && source.includes('syncWorkspaceState()'))
     check(checks, 'webview message listener is registered before html is assigned', (
@@ -760,6 +822,27 @@ async function runVsCodeWorkspaceDetectionEval(): Promise<EvalResult> {
     check(checks, 'active file resolves to child project root', activeFileRoot === projectRoot, activeFileRoot)
     check(checks, 'workspace options expose detected project root', options.length === 1 && options[0]?.path === projectRoot && options[0]?.selected === true, JSON.stringify(options))
   }, root)
+}
+
+async function runIdeAutoCompactEventEval(): Promise<EvalResult> {
+  return runCase('ide-auto-compact-event', async checks => {
+    const root = getOriginalProjectRoot()
+    const serverSource = await readFile(join(root, 'src', 'ideServer.ts'), 'utf8')
+    const protocolSource = await readFile(join(root, 'src', 'ideProtocol.ts'), 'utf8')
+
+    check(checks, 'IDE protocol exposes auto compact summary', (
+      protocolSource.includes('IdeAutoCompactSummary') &&
+      protocolSource.includes('autoCompact?: IdeAutoCompactSummary')
+    ), protocolSource.slice(0, 2_000))
+    check(checks, 'IDE server returns auto compact result before run starts', (
+      serverSource.includes('const autoCompact = await autoCompactSessionIfNeeded(session)') &&
+      serverSource.includes('autoCompact,')
+    ), serverSource.slice(0, 8_000))
+    check(checks, 'auto compact result omits raw summary text from IDE event', (
+      serverSource.includes('compactedMessageCount: result.compactedMessageCount') &&
+      !serverSource.includes('autoCompact: result.summary')
+    ), serverSource.slice(0, 12_000))
+  })
 }
 
 async function runResponsesStreamErrorSurfaceEval(): Promise<EvalResult> {

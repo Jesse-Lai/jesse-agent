@@ -201,7 +201,7 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
 
   session.messages.push({ role: 'user', content: formatIdePrompt(prompt, request.context) })
   session.persistedMessageCount = await recordNewMessages(session.transcript, session.messages, session.persistedMessageCount)
-  await autoCompactSessionIfNeeded(session)
+  const autoCompact = await autoCompactSessionIfNeeded(session)
 
   res.writeHead(200, {
     'content-type': 'application/x-ndjson; charset=utf-8',
@@ -215,6 +215,7 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
     sessionId: session.transcript.id,
     messageCount: session.messages.length,
     permissionMode,
+    autoCompact,
   })
 
   const projectRoot = workspaceRoot ?? getProjectRoot()
@@ -257,12 +258,17 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
   res.end()
 }
 
-async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<void> {
+async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<{
+  beforeMessageCount: number
+  afterMessageCount: number
+  compactedMessageCount: number
+  keptRecentMessages: number
+} | undefined> {
   const chars = estimateContextChars(session.messages)
-  if (chars < IDE_AUTO_COMPACT_CHARS) return
+  if (chars < IDE_AUTO_COMPACT_CHARS) return undefined
 
   const result = await compactMessages(session.messages)
-  if (!result.compacted) return
+  if (!result.compacted) return undefined
 
   await session.transcript.appendCompactBoundary({
     beforeMessageCount: result.beforeMessageCount,
@@ -275,6 +281,13 @@ async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<voi
   session.messages.splice(0, session.messages.length, ...result.messages)
   await refreshSessionSystemPrompt(session.messages)
   session.persistedMessageCount = session.messages.length
+
+  return {
+    beforeMessageCount: result.beforeMessageCount,
+    afterMessageCount: result.afterMessageCount,
+    compactedMessageCount: result.compactedMessageCount,
+    keptRecentMessages: result.keptRecentMessages,
+  }
 }
 
 async function activateWorkspace(path: string | undefined): Promise<string> {
