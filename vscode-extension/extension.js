@@ -292,15 +292,27 @@ function collectEditorContext(options) {
   const selectedText = options.includeSelection && !editor.selection.isEmpty
     ? document.getText(editor.selection)
     : undefined
+  const cursorPosition = formatPosition(editor.selection.active)
+  const selectionRange = editor.selection.isEmpty ? undefined : formatRange(editor.selection)
   const diagnostics = activeFile ? formatDiagnostics(document.uri) : undefined
 
   return {
     workspaceRoot,
     activeFile,
     activeFileLanguage: document.languageId,
+    cursorPosition,
+    selectionRange,
     selectedText,
     diagnostics,
   }
+}
+
+function formatPosition(position) {
+  return `${position.line + 1}:${position.character + 1}`
+}
+
+function formatRange(range) {
+  return `${formatPosition(range.start)}-${formatPosition(range.end)}`
 }
 
 function formatDiagnostics(uri) {
@@ -317,7 +329,7 @@ function summarizeContext(context) {
   const parts = []
   if (context.workspaceRoot) parts.push(`workspace: ${context.workspaceRoot}`)
   if (context.activeFile) parts.push(`file: ${context.activeFile}`)
-  if (context.selectedText) parts.push(`${context.selectedText.length} selected chars`)
+  if (context.selectedText) parts.push(`${context.selectedText.length} selected chars${context.selectionRange ? ` @ ${context.selectionRange}` : ''}`)
   if (context.diagnostics) parts.push('diagnostics attached')
   return parts.join(' | ')
 }
@@ -605,7 +617,7 @@ async function ensureIdeServer(context) {
 
     const child = cp.spawn(npmCommand(), ['run', 'ide:server', '--silent'], {
       cwd: agentRoot,
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: { ...process.env, ...llmEnvOverrides(), FORCE_COLOR: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -658,6 +670,17 @@ async function ensureIdeServer(context) {
   } finally {
     ideServerStartPromise = null
   }
+}
+
+function llmEnvOverrides() {
+  const config = vscode.workspace.getConfiguration('jesseAgent')
+  return Object.fromEntries([
+    ['LLM_BASE_URL', config.get('llmBaseUrl', '')],
+    ['LLM_MODEL', config.get('llmModel', '')],
+    ['LLM_API_MODE', config.get('llmApiMode', '')],
+    ['LLM_API_KEY', config.get('llmApiKey', '')],
+    ['LLM_API_KEY_HEADER', config.get('llmApiKeyHeader', '')],
+  ].filter(([, value]) => typeof value === 'string' && value.trim()).map(([key, value]) => [key, value.trim()]))
 }
 
 function postAgentRequest(server, request, onOutput) {
@@ -984,6 +1007,7 @@ function renderChatHtml(webview, initialState = {}) {
     .approval.resolved { border-color: var(--vscode-panel-border); opacity: 0.78; }
     .approval.resolved .approval-actions { display: none; }
     .approval-title { font-weight: 600; margin-bottom: 6px; }
+    .approval-kind { display: inline-flex; width: fit-content; margin-bottom: 8px; padding: 2px 7px; border: 1px solid var(--vscode-panel-border); border-radius: 999px; color: var(--vscode-descriptionForeground); font-size: 11px; }
     .approval-meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 10px; }
     .approval-summary { display: inline-flex; gap: 10px; align-items: center; margin-bottom: 10px; color: var(--vscode-descriptionForeground); font-size: 12px; }
     .approval-summary .added { color: var(--vscode-gitDecoration-addedResourceForeground); }
@@ -1068,7 +1092,10 @@ function renderChatHtml(webview, initialState = {}) {
     document.getElementById('dev-compact').addEventListener('click', () => vscode.postMessage({ type: 'devCompact' }));
     document.getElementById('dev-eval').addEventListener('click', () => vscode.postMessage({ type: 'devEval' }));
     prompt.addEventListener('keydown', event => {
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !isRunning) ask();
+      if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+      if (event.shiftKey) return;
+      event.preventDefault();
+      if (!isRunning) ask();
     });
     postReady();
     setTimeout(postReady, 100);
@@ -1292,7 +1319,7 @@ function renderChatHtml(webview, initialState = {}) {
         row.appendChild(button);
         const meta = document.createElement('div');
         meta.className = 'session-meta';
-        meta.textContent = [session.updatedAt, (session.messageCount || 0) + ' messages'].filter(Boolean).join(' · ');
+        meta.textContent = [formatSessionTime(session.updatedAt), (session.messageCount || 0) + ' messages'].filter(Boolean).join(' · ');
         row.appendChild(meta);
         if (session.lastUserMessage) {
           const last = document.createElement('div');
@@ -1304,6 +1331,22 @@ function renderChatHtml(webview, initialState = {}) {
       }
       messages.appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function formatSessionTime(value) {
+      const date = new Date(value || '');
+      if (Number.isNaN(date.getTime())) return String(value || '');
+      const now = new Date();
+      const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+      const time = pad2(date.getHours()) + ':' + pad2(date.getMinutes());
+      if (startOfDate === startOfToday) return '今天 ' + time;
+      if (startOfDate === startOfToday - 24 * 60 * 60 * 1000) return '昨天 ' + time;
+      return String(date.getMonth() + 1) + '月' + String(date.getDate()) + '日 ' + time;
+    }
+
+    function pad2(value) {
+      return String(value).padStart(2, '0');
     }
 
     function summarizeApproval(request) {
@@ -1402,6 +1445,10 @@ function renderChatHtml(webview, initialState = {}) {
     }
 
     function addToolStart(name, args) {
+      currentToolCall = { name, args };
+      lastToolCard = null;
+      if (!debugUiEnabled) return;
+
       const item = document.createElement('div');
       item.className = 'msg tool tool-card';
       const details = document.createElement('details');
@@ -1415,13 +1462,13 @@ function renderChatHtml(webview, initialState = {}) {
       item.appendChild(details);
       messages.appendChild(item);
       lastToolCard = { name, args, details };
-      currentToolCall = { name, args };
       window.scrollTo(0, document.body.scrollHeight);
     }
 
     function addToolResult(name, ok, content) {
       const target = lastToolCard && lastToolCard.name === name ? lastToolCard.details : null;
       if (!target) {
+        if (!debugUiEnabled) return;
         addMessage('tool', 'Tool result: ' + name + ' ' + (ok ? 'ok' : 'error') + ' (' + String(content || '').length + ' chars)');
         return;
       }
@@ -1440,12 +1487,17 @@ function renderChatHtml(webview, initialState = {}) {
 
       const title = document.createElement('div');
       title.className = 'approval-title';
-      title.textContent = request.title || ('Approve ' + request.toolName);
+      title.textContent = approvalHeading(request);
       item.appendChild(title);
+
+      const kind = document.createElement('div');
+      kind.className = 'approval-kind';
+      kind.textContent = approvalKind(request);
+      item.appendChild(kind);
 
       const meta = document.createElement('div');
       meta.className = 'approval-meta';
-      meta.textContent = request.files && request.files.length ? 'Files: ' + request.files.join(', ') : 'Tool: ' + request.toolName;
+      meta.textContent = approvalMeta(request);
       item.appendChild(meta);
 
       const reason = document.createElement('div');
@@ -1516,6 +1568,34 @@ function renderChatHtml(webview, initialState = {}) {
       if (request.toolName === 'run_command' || request.toolName === 'run_background_command') return 'Approval is required because shell commands can change your workspace.';
       if (String(request.toolName || '').startsWith('mcp__')) return 'Approval is required before calling an external MCP tool.';
       return 'Approval is required because this tool can change state or start another task.';
+    }
+
+    function approvalHeading(request) {
+      if (!request) return 'Approval required';
+      const input = asObject(request.args);
+      if (request.toolName === 'write_file') return 'Review file write: ' + stringValue(input.path, 'unknown file');
+      if (request.toolName === 'edit_file') return 'Review file edit: ' + stringValue(input.path, 'unknown file');
+      if (request.toolName === 'run_command') return 'Approve shell command: ' + stringValue(input.command, request.toolName);
+      if (request.toolName === 'run_background_command') return 'Approve background command: ' + stringValue(input.command, request.toolName);
+      if (String(request.toolName || '').startsWith('mcp__')) return 'Approve external tool: ' + request.toolName;
+      return request.title || ('Approve ' + request.toolName);
+    }
+
+    function approvalKind(request) {
+      if (!request) return 'Approval';
+      if (request.toolName === 'write_file' || request.toolName === 'edit_file') return 'File change';
+      if (request.toolName === 'run_command' || request.toolName === 'run_background_command') return 'Shell command';
+      if (String(request.toolName || '').startsWith('mcp__')) return 'External tool';
+      if (request.toolName === 'agent' || request.toolName === 'task_continue' || request.toolName === 'task_stop') return 'Agent task';
+      return 'Tool action';
+    }
+
+    function approvalMeta(request) {
+      if (!request) return '';
+      const input = asObject(request.args);
+      if (request.files && request.files.length) return 'Files: ' + request.files.join(', ');
+      if ((request.toolName === 'run_command' || request.toolName === 'run_background_command') && input.cwd) return 'cwd: ' + input.cwd;
+      return 'Tool: ' + request.toolName;
     }
 
     function createDiffReview(diffText, files) {

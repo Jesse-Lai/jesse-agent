@@ -758,6 +758,7 @@ async function runImplementationTraceGuidanceEval(): Promise<EvalResult> {
 async function runIdeTimelineUiEval(): Promise<EvalResult> {
   return runCase('ide-timeline-ui', async checks => {
     const source = await readFile(join(getOriginalProjectRoot(), 'vscode-extension', 'extension.js'), 'utf8')
+    const sessionSource = await readFile(join(getOriginalProjectRoot(), 'src', 'session.ts'), 'utf8')
     const script = extractWebviewScript(source)
     const generatedScript = extractGeneratedWebviewScript(source)
 
@@ -775,12 +776,30 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
       source.includes('Run finished')
     ))
     check(checks, 'top session label hides raw session id', source.includes("sessionLabel.textContent = 'active'"))
+    check(checks, 'history hides sessions without user dialogue', sessionSource.includes('summary.userMessageCount > 0'))
+    check(checks, 'history displays human readable session time', source.includes('formatSessionTime(session.updatedAt)') && source.includes("'今天 '") && source.includes("'昨天 '"))
     check(checks, 'workspace selector is available', source.includes('selectWorkspace') && source.includes('workspaceOptions'))
     check(checks, 'ide normal chat does not hardcode maxTurns', !source.includes('IDE_MAX_TURNS') && !source.includes('maxTurns: IDE_MAX_TURNS'))
     check(checks, 'dev controls are hidden behind dev mode', source.includes('dev-only') && source.includes("message.devMode === true"))
     check(checks, 'changed files summary exists', source.includes('Files changed in this run') && source.includes('recordChangedFileFromTool'))
     check(checks, 'changed files summary ignores no-op edits', source.includes('isNoChangeToolResult') && source.includes('recordChangedFileFromTool(message.name, message.ok, message.content)'))
     check(checks, 'timeline records automatic compaction', source.includes('Context summarized automatically') && source.includes('summarizeAutoCompact'))
+    check(checks, 'raw tool cards are hidden outside dev mode', (
+      source.includes('if (!debugUiEnabled) return;') &&
+      source.includes('lastToolCard = null;')
+    ))
+    check(checks, 'approval cards show action categories', (
+      source.includes('approvalKind(request)') &&
+      source.includes('File change') &&
+      source.includes('Shell command') &&
+      source.includes('External tool')
+    ))
+    check(checks, 'enter sends prompt while shift enter keeps newline', (
+      source.includes("event.key !== 'Enter'") &&
+      source.includes('event.isComposing') &&
+      source.includes('event.shiftKey') &&
+      source.includes('event.preventDefault()')
+    ))
     check(checks, 'tool results use linked text renderer', source.includes('renderLinkedText(result') && source.includes('Dockerfile'))
     check(checks, 'webview sends ready handshake for workspace state', source.includes("type: 'ready'") && source.includes('syncWorkspaceState()'))
     check(checks, 'webview message listener is registered before html is assigned', (
@@ -794,6 +813,7 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
     check(checks, 'webview html template does not reference browser-only initialServerState', !source.includes('${initialServerState.devMode'))
     check(checks, 'webview surfaces script errors in ui', source.includes("'script error: '") && source.includes('unhandledrejection'))
     check(checks, 'assistant replies use markdown renderer', source.includes('renderAssistantMarkdown(body') && source.includes('finalizeAssistantLinks'))
+    check(checks, 'IDE context includes cursor and selection range', source.includes('cursorPosition') && source.includes('selectionRange') && source.includes('formatRange(editor.selection)'))
   })
 }
 
@@ -871,14 +891,25 @@ async function runVsCodePackagingConfigEval(): Promise<EvalResult> {
     const root = getOriginalProjectRoot()
     const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
     const extensionJson = JSON.parse(await readFile(join(root, 'vscode-extension', 'package.json'), 'utf8')) as Record<string, unknown>
+    const extensionSource = await readFile(join(root, 'vscode-extension', 'extension.js'), 'utf8')
+    const extensionReadme = await readFile(join(root, 'vscode-extension', 'README.md'), 'utf8')
     const scripts = packageJson.scripts as Record<string, unknown> | undefined
     const contributes = extensionJson.contributes as { commands?: Array<{ command?: string }>; configuration?: { properties?: Record<string, unknown> } } | undefined
     const activationEvents = extensionJson.activationEvents as string[] | undefined
 
-    check(checks, 'root package has VS Code package script', typeof scripts?.['package:vscode'] === 'string' && String(scripts['package:vscode']).includes('vsce package'))
+    check(checks, 'VS Code extension version is bumped', extensionJson.version === '0.0.6', String(extensionJson.version))
+    check(checks, 'root package has VS Code package script', typeof scripts?.['package:vscode'] === 'string' && String(scripts['package:vscode']).includes('jesse-agent-vscode-0.0.6.vsix'))
     check(checks, 'select workspace command is registered', Boolean(contributes?.commands?.some(command => command.command === 'jesseAgent.selectWorkspace')))
     check(checks, 'select workspace activation is registered', Boolean(activationEvents?.includes('onCommand:jesseAgent.selectWorkspace')))
     check(checks, 'dev mode setting is registered', Boolean(contributes?.configuration?.properties?.['jesseAgent.devMode']))
+    check(checks, 'LLM settings are registered', (
+      Boolean(contributes?.configuration?.properties?.['jesseAgent.llmBaseUrl']) &&
+      Boolean(contributes?.configuration?.properties?.['jesseAgent.llmModel']) &&
+      Boolean(contributes?.configuration?.properties?.['jesseAgent.llmApiMode']) &&
+      Boolean(contributes?.configuration?.properties?.['jesseAgent.llmApiKey'])
+    ))
+    check(checks, 'extension passes LLM settings to server env', extensionSource.includes('llmEnvOverrides()') && extensionSource.includes('LLM_BASE_URL') && extensionSource.includes('LLM_MODEL'))
+    check(checks, 'README documents packaged VSIX version', extensionReadme.includes('jesse-agent-vscode-0.0.6.vsix'))
   })
 }
 

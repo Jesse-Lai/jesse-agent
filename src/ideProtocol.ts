@@ -35,6 +35,8 @@ export interface IdeBridgeContext {
   workspaceRoot?: string
   activeFile?: string
   activeFileLanguage?: string
+  cursorPosition?: string
+  selectionRange?: string
   selectedText?: string
   diagnostics?: string
 }
@@ -122,6 +124,8 @@ export function formatIdePrompt(prompt: string, context?: IdeBridgeContext): str
   if (ideContext.workspaceRoot) sections.push(`Workspace root: ${ideContext.workspaceRoot}`)
   if (ideContext.activeFile) sections.push(`Active file: ${ideContext.activeFile}`)
   if (ideContext.activeFileLanguage) sections.push(`Language: ${ideContext.activeFileLanguage}`)
+  if (ideContext.cursorPosition) sections.push(`Cursor: ${ideContext.cursorPosition}`)
+  if (ideContext.selectionRange) sections.push(`Selection: ${ideContext.selectionRange}`)
   if (ideContext.selectedText) {
     sections.push('', 'Selected text:', fenced(ideContext.selectedText, ideContext.activeFileLanguage))
   }

@@ -33,6 +33,11 @@ Jesse Agent is workspace-first. History is read from the current workspace's `.j
 
 - `jesseAgent.agentRoot`: path to the `jesse-agent` project root. Leave empty for auto-detect during local development.
 - `jesseAgent.permissionMode`: `plan`, `default`, or `acceptEdits`. Use `default` for IDE approval cards; `plan` stays read-only; `acceptEdits` skips project-local edit approvals. Reject will stop the current agent run and will not keep asking about the same rejected tool call.
+- `jesseAgent.llmBaseUrl`: optional `LLM_BASE_URL` override for the local server. Leave empty to use `.env`.
+- `jesseAgent.llmModel`: optional `LLM_MODEL` override. Leave empty to use `.env`.
+- `jesseAgent.llmApiMode`: optional `LLM_API_MODE` override: `chat_completions` or `responses`.
+- `jesseAgent.llmApiKey`: optional `LLM_API_KEY` override. Prefer `.env` or VS Code user settings; never commit secrets in workspace settings.
+- `jesseAgent.llmApiKeyHeader`: optional `LLM_API_KEY_HEADER` override, for example `api-key` for Azure OpenAI.
 - `jesseAgent.devMode`: show internal developer controls for health, eval, raw diff, and compact. Keep this off for normal use.
 
 ## Package
@@ -43,7 +48,7 @@ From the repository root:
 npm run package:vscode
 ```
 
-The packaged extension is written to `dist/jesse-agent-vscode-0.0.5.vsix`.
+The packaged extension is written to `dist/jesse-agent-vscode-0.0.6.vsix`.
 
 ## Architecture
 

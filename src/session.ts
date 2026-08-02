@@ -227,6 +227,7 @@ export async function listSessionSummaries(limit = 12): Promise<SessionSummary[]
 
   return summaries
     .filter((summary): summary is SessionSummary => summary !== null)
+    .filter(summary => summary.userMessageCount > 0)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
     .slice(0, Math.max(1, limit))
 }

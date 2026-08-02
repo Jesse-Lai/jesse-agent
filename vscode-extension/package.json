@@ -2,7 +2,7 @@
   "name": "jesse-agent-vscode",
   "displayName": "Jesse Agent",
   "description": "VS Code frontend for the local Jesse Agent core.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "jesse-local",
   "license": "UNLICENSED",
   "private": true,
@@ -76,6 +76,32 @@
           "enum": ["plan", "default", "acceptEdits"],
           "default": "default",
           "description": "Permission mode used by VS Code local server requests. Default asks for approval before non-read-only tools."
+        },
+        "jesseAgent.llmBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for LLM_BASE_URL when the local Jesse Agent server starts. Leave empty to use .env."
+        },
+        "jesseAgent.llmModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for LLM_MODEL when the local Jesse Agent server starts. Leave empty to use .env."
+        },
+        "jesseAgent.llmApiMode": {
+          "type": "string",
+          "enum": ["", "chat_completions", "responses"],
+          "default": "",
+          "description": "Optional override for LLM_API_MODE. Leave empty to auto-detect from the base URL or use .env."
+        },
+        "jesseAgent.llmApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for LLM_API_KEY. Prefer .env or VS Code user settings; do not commit secrets in workspace settings."
+        },
+        "jesseAgent.llmApiKeyHeader": {
+          "type": "string",
+          "default": "",
+          "description": "Optional override for LLM_API_KEY_HEADER, for example api-key for Azure OpenAI. Leave empty to auto-detect."
         },
         "jesseAgent.devMode": {
           "type": "boolean",
