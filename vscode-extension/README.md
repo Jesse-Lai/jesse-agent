@@ -27,7 +27,9 @@ The chat panel shows a run timeline while the agent works. File edits show an ap
 
 ## Workspace And History
 
-Jesse Agent is workspace-first. History is read from the current workspace's `.jesse/sessions` directory, so different projects keep separate session lists. In a multi-root VS Code window, use `Jesse Agent: Select Workspace` or the `Change` link in the panel to choose which workspace the agent should use.
+Jesse Agent is workspace-first. History is read from the current workspace's `.jesse/sessions` directory, so different projects keep separate session lists.
+
+Use `Jesse Agent: Select Workspace`, the `Projects` button, or the `Change` link in the panel to choose which project the agent should use. The extension remembers recently selected project folders in VS Code global storage. Use `Add Project Folder...` in the project picker to add a folder that is not currently open in the VS Code window.
 
 ## Settings
 
@@ -48,7 +50,7 @@ From the repository root:
 npm run package:vscode
 ```
 
-The packaged extension is written to `dist/jesse-agent-vscode-0.0.6.vsix`.
+The packaged extension is written to `dist/jesse-agent-vscode-0.0.7.vsix`.
 
 ## Architecture
 

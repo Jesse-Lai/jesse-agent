@@ -779,6 +779,13 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
     check(checks, 'history hides sessions without user dialogue', sessionSource.includes('summary.userMessageCount > 0'))
     check(checks, 'history displays human readable session time', source.includes('formatSessionTime(session.updatedAt)') && source.includes("'今天 '") && source.includes("'昨天 '"))
     check(checks, 'workspace selector is available', source.includes('selectWorkspace') && source.includes('workspaceOptions'))
+    check(checks, 'projects picker is available from chat toolbar', source.includes('id="projects"') && source.includes("Add Project Folder"))
+    check(checks, 'projects registry persists recent workspaces', (
+      source.includes('PROJECT_REGISTRY_KEY') &&
+      source.includes('globalState?.update?.(PROJECT_REGISTRY_KEY') &&
+      source.includes('readProjectRegistry')
+    ))
+    check(checks, 'workspace options merge detected and recent projects', source.includes('mergeWorkspaceOptions(detectedWorkspaceRoots(), projectRegistryOptions())'))
     check(checks, 'ide normal chat does not hardcode maxTurns', !source.includes('IDE_MAX_TURNS') && !source.includes('maxTurns: IDE_MAX_TURNS'))
     check(checks, 'dev controls are hidden behind dev mode', source.includes('dev-only') && source.includes("message.devMode === true"))
     check(checks, 'changed files summary exists', source.includes('Files changed in this run') && source.includes('recordChangedFileFromTool'))
@@ -897,8 +904,8 @@ async function runVsCodePackagingConfigEval(): Promise<EvalResult> {
     const contributes = extensionJson.contributes as { commands?: Array<{ command?: string }>; configuration?: { properties?: Record<string, unknown> } } | undefined
     const activationEvents = extensionJson.activationEvents as string[] | undefined
 
-    check(checks, 'VS Code extension version is bumped', extensionJson.version === '0.0.6', String(extensionJson.version))
-    check(checks, 'root package has VS Code package script', typeof scripts?.['package:vscode'] === 'string' && String(scripts['package:vscode']).includes('jesse-agent-vscode-0.0.6.vsix'))
+    check(checks, 'VS Code extension version is bumped', extensionJson.version === '0.0.7', String(extensionJson.version))
+    check(checks, 'root package has VS Code package script', typeof scripts?.['package:vscode'] === 'string' && String(scripts['package:vscode']).includes('jesse-agent-vscode-0.0.7.vsix'))
     check(checks, 'select workspace command is registered', Boolean(contributes?.commands?.some(command => command.command === 'jesseAgent.selectWorkspace')))
     check(checks, 'select workspace activation is registered', Boolean(activationEvents?.includes('onCommand:jesseAgent.selectWorkspace')))
     check(checks, 'dev mode setting is registered', Boolean(contributes?.configuration?.properties?.['jesseAgent.devMode']))
@@ -909,7 +916,7 @@ async function runVsCodePackagingConfigEval(): Promise<EvalResult> {
       Boolean(contributes?.configuration?.properties?.['jesseAgent.llmApiKey'])
     ))
     check(checks, 'extension passes LLM settings to server env', extensionSource.includes('llmEnvOverrides()') && extensionSource.includes('LLM_BASE_URL') && extensionSource.includes('LLM_MODEL'))
-    check(checks, 'README documents packaged VSIX version', extensionReadme.includes('jesse-agent-vscode-0.0.6.vsix'))
+    check(checks, 'README documents packaged VSIX version', extensionReadme.includes('jesse-agent-vscode-0.0.7.vsix'))
   })
 }
 

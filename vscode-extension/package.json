@@ -2,7 +2,7 @@
   "name": "jesse-agent-vscode",
   "displayName": "Jesse Agent",
   "description": "VS Code frontend for the local Jesse Agent core.",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "jesse-local",
   "license": "UNLICENSED",
   "private": true,

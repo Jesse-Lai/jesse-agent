@@ -14,7 +14,7 @@
     "ide:server": "tsx --env-file=.env src/ideServer.ts",
     "eval": "tsx --env-file=.env src/evals/runner.ts",
     "build": "tsc",
-    "package:vscode": "mkdir -p dist && cd vscode-extension && npm exec --package @vscode/vsce -- vsce package --no-dependencies --out ../dist/jesse-agent-vscode-0.0.6.vsix",
+    "package:vscode": "mkdir -p dist && cd vscode-extension && npm exec --package @vscode/vsce -- vsce package --no-dependencies --out ../dist/jesse-agent-vscode-0.0.7.vsix",
     "start": "node --env-file=.env dist/index.js",
     "typecheck": "tsc --noEmit"
   },

@@ -4,6 +4,9 @@ const http = require('node:http')
 const path = require('node:path')
 const vscode = require('vscode')
 
+const PROJECT_REGISTRY_KEY = 'jesseAgent.projectRegistry.v1'
+const ADD_PROJECT_PICK = '__add_project__'
+
 let chatPanel = null
 let ideServer = null
 let ideServerStartPromise = null
@@ -11,8 +14,11 @@ let chatMessages = []
 let currentSessionId = null
 let selectedWorkspaceRoot = null
 let runInProgress = false
+let extensionContext = null
 
 function activate(context) {
+  extensionContext = context
+  void registerDetectedWorkspaceRoots(context)
   context.subscriptions.push(
     vscode.commands.registerCommand('jesseAgent.openChat', () => openChat(context)),
     vscode.commands.registerCommand('jesseAgent.askSelection', () => askSelection(context)),
@@ -21,8 +27,14 @@ function activate(context) {
     vscode.commands.registerCommand('jesseAgent.fixDiagnostics', () => fixDiagnostics(context)),
     vscode.commands.registerCommand('jesseAgent.reviewChanges', () => reviewChanges(context)),
     vscode.commands.registerCommand('jesseAgent.selectWorkspace', () => selectWorkspace(context)),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => syncWorkspaceState()),
-    vscode.window.onDidChangeActiveTextEditor(() => syncWorkspaceState()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void registerDetectedWorkspaceRoots(context)
+      syncWorkspaceState()
+    }),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      void registerDetectedWorkspaceRoots(context)
+      syncWorkspaceState()
+    }),
   )
 }
 
@@ -30,6 +42,7 @@ function deactivate() {
   if (ideServer?.process) ideServer.process.kill()
   ideServer = null
   ideServerStartPromise = null
+  extensionContext = null
 }
 
 function openChat(context) {
@@ -118,21 +131,40 @@ async function reviewChanges(context) {
 }
 
 async function selectWorkspace(context) {
+  await registerDetectedWorkspaceRoots(context)
   const options = workspaceOptions()
-  if (options.length === 0) {
-    vscode.window.showInformationMessage('Open a workspace folder first.')
-    return
-  }
 
-  if (options.length === 1) {
-    selectedWorkspaceRoot = options[0].path
-  } else {
-    const picked = await vscode.window.showQuickPick(
-      options.map(option => ({ label: option.name, description: option.description || option.path, option })),
-      { title: 'Select Jesse Agent workspace' },
-    )
-    if (!picked) return
+  const picked = await vscode.window.showQuickPick(
+    [
+      ...options.map(option => ({
+        label: option.selected ? `$(check) ${option.name}` : option.name,
+        description: option.description || option.path,
+        detail: option.path,
+        option,
+      })),
+      { label: '$(add) Add Project Folder...', description: 'Choose another local folder', command: ADD_PROJECT_PICK },
+    ],
+    { title: 'Select Jesse Agent project' },
+  )
+  if (!picked) return
+
+  if (picked.command === ADD_PROJECT_PICK) {
+    const folders = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      title: 'Add Jesse Agent project folder',
+      openLabel: 'Add Project',
+    })
+    const folder = folders?.[0]?.fsPath
+    if (!folder) return
+    selectedWorkspaceRoot = normalizeProjectPath(folder)
+    await registerProject(context, selectedWorkspaceRoot, 'manual')
+  } else if (picked.option?.path) {
     selectedWorkspaceRoot = picked.option.path
+    await registerProject(context, selectedWorkspaceRoot, 'selected')
+  } else {
+    return
   }
 
   currentSessionId = null
@@ -508,7 +540,7 @@ function activeWorkspaceRoot(filePath) {
   }
 
   const detected = detectedWorkspaceRoots()
-  return detected[0]?.path
+  return detected[0]?.path || projectRegistryOptions()[0]?.path
 }
 
 function workspaceFolders() {
@@ -517,10 +549,23 @@ function workspaceFolders() {
 
 function workspaceOptions() {
   const selected = activeWorkspaceRoot()
-  return detectedWorkspaceRoots().map(option => ({
+  return mergeWorkspaceOptions(detectedWorkspaceRoots(), projectRegistryOptions()).map(option => ({
     ...option,
     selected: option.path === selected,
   }))
+}
+
+function mergeWorkspaceOptions(...groups) {
+  const seen = new Set()
+  const merged = []
+  for (const group of groups) {
+    for (const option of group) {
+      if (!option?.path || seen.has(option.path)) continue
+      seen.add(option.path)
+      merged.push(option)
+    }
+  }
+  return merged
 }
 
 function detectedWorkspaceRoots() {
@@ -547,7 +592,68 @@ function detectedWorkspaceRoots() {
 }
 
 function isKnownWorkspaceRoot(rootPath) {
-  return detectedWorkspaceRoots().some(option => option.path === rootPath)
+  if (!safeIsDirectory(rootPath)) return false
+  return mergeWorkspaceOptions(detectedWorkspaceRoots(), projectRegistryOptions()).some(option => option.path === rootPath)
+}
+
+async function registerDetectedWorkspaceRoots(context) {
+  for (const option of detectedWorkspaceRoots()) {
+    await registerProject(context, option.path, 'workspace')
+  }
+}
+
+async function registerProject(context, rootPath, source = 'manual') {
+  const normalized = normalizeProjectPath(rootPath)
+  if (!normalized || !safeIsDirectory(normalized)) return
+
+  const now = new Date().toISOString()
+  const current = readProjectRegistry(context).filter(project => project.path !== normalized)
+  current.unshift({
+    name: path.basename(normalized) || normalized,
+    path: normalized,
+    source,
+    lastUsedAt: now,
+  })
+  await context?.globalState?.update?.(PROJECT_REGISTRY_KEY, current.slice(0, 50))
+}
+
+function projectRegistryOptions(context = extensionContext) {
+  return readProjectRegistry(context)
+    .filter(project => safeIsDirectory(project.path))
+    .map(project => ({
+      name: project.name || path.basename(project.path) || project.path,
+      path: project.path,
+      description: `Recent project · ${project.path}`,
+      lastUsedAt: project.lastUsedAt,
+    }))
+}
+
+function readProjectRegistry(context = extensionContext) {
+  const raw = context?.globalState?.get?.(PROJECT_REGISTRY_KEY, [])
+  if (!Array.isArray(raw)) return []
+  return raw
+    .flatMap(item => {
+      if (!item || typeof item !== 'object') return []
+      const normalized = normalizeProjectPath(item.path)
+      if (!normalized) return []
+      return [{
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : path.basename(normalized),
+        path: normalized,
+        source: typeof item.source === 'string' ? item.source : 'manual',
+        lastUsedAt: typeof item.lastUsedAt === 'string' ? item.lastUsedAt : '',
+      }]
+    })
+    .sort((a, b) => Date.parse(b.lastUsedAt || '0') - Date.parse(a.lastUsedAt || '0'))
+}
+
+function normalizeProjectPath(rootPath) {
+  if (typeof rootPath !== 'string' || !rootPath.trim()) return undefined
+  const resolved = path.resolve(rootPath.trim())
+  try {
+    return fs.realpathSync.native(resolved)
+  } catch {
+    return resolved
+  }
 }
 
 function detectProjectRootForPath(filePath, workspaceRoot) {
@@ -1042,6 +1148,7 @@ function renderChatHtml(webview, initialState = {}) {
   <div class="toolbar">
     <button id="new-chat">New Chat</button>
     <button id="sessions">History</button>
+    <button id="projects">Projects</button>
     <button id="dev-health" class="dev-only">Health</button>
     <button id="dev-diff" class="dev-only">Diff</button>
     <button id="dev-compact" class="dev-only">Compact</button>
@@ -1086,6 +1193,7 @@ function renderChatHtml(webview, initialState = {}) {
     askButton.addEventListener('click', () => isRunning ? vscode.postMessage({ type: 'cancel' }) : ask());
     document.getElementById('new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
     document.getElementById('sessions').addEventListener('click', () => vscode.postMessage({ type: 'showSessions' }));
+    document.getElementById('projects').addEventListener('click', () => vscode.postMessage({ type: 'selectWorkspace' }));
     document.getElementById('workspace-change').addEventListener('click', () => vscode.postMessage({ type: 'selectWorkspace' }));
     document.getElementById('dev-health').addEventListener('click', () => vscode.postMessage({ type: 'devHealth' }));
     document.getElementById('dev-diff').addEventListener('click', () => vscode.postMessage({ type: 'devDiff' }));
