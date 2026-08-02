@@ -145,14 +145,18 @@ function syncWorkspaceState(label) {
   if (!selectedWorkspaceRoot || !workspaceFolders().some(folder => folder.uri.fsPath === selectedWorkspaceRoot)) {
     selectedWorkspaceRoot = null
   }
-  chatPanel?.webview.postMessage({
+  chatPanel?.webview.postMessage(serverStatePayload())
+  if (label) chatPanel?.webview.postMessage({ type: 'status', text: label })
+}
+
+function serverStatePayload() {
+  return {
     type: 'serverState',
     workspaceRoot: workspaceRequest().workspaceRoot,
     sessionId: currentSessionId,
     devMode: getDevMode(),
     workspaceOptions: workspaceOptions(),
-  })
-  if (label) chatPanel?.webview.postMessage({ type: 'status', text: label })
+  }
 }
 
 function ensureChatPanel(context) {
@@ -164,21 +168,16 @@ function ensureChatPanel(context) {
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true },
   )
-  chatPanel.webview.html = renderChatHtml(chatPanel.webview)
-  setTimeout(() => {
-    chatPanel?.webview.postMessage({
-      type: 'serverState',
-      workspaceRoot: workspaceRequest().workspaceRoot,
-      sessionId: currentSessionId,
-      devMode: getDevMode(),
-      workspaceOptions: workspaceOptions(),
-    })
-  }, 0)
   chatPanel.onDidDispose(() => {
     chatPanel = null
   })
 
   chatPanel.webview.onDidReceiveMessage(async message => {
+    if (message?.type === 'ready') {
+      syncWorkspaceState()
+      return
+    }
+
     if (message?.type === 'ask') {
       await runPromptFromEditor(context, String(message.prompt || ''), { includeSelection: true })
       return
@@ -238,6 +237,10 @@ function ensureChatPanel(context) {
       await openFileFromWebview(message)
     }
   })
+
+  chatPanel.webview.html = renderChatHtml(chatPanel.webview, serverStatePayload())
+  setTimeout(() => syncWorkspaceState(), 50)
+  setTimeout(() => syncWorkspaceState(), 250)
 
   return chatPanel
 }
@@ -824,14 +827,37 @@ function npmCommand() {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm'
 }
 
-function renderChatHtml(webview) {
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char])
+}
+
+function scriptJson(value) {
+  return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, char => ({
+    '<': '\\u003c',
+    '>': '\\u003e',
+    '&': '\\u0026',
+    '\u2028': '\\u2028',
+    '\u2029': '\\u2029',
+  })[char])
+}
+
+function renderChatHtml(webview, initialState = {}) {
   const nonce = String(Date.now())
+  const initialWorkspace = initialState.workspaceRoot || 'No workspace detected'
+  const initialSession = initialState.sessionId ? 'active' : 'none'
+  const initialStateJson = scriptJson(initialState)
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'unsafe-inline';">
   <title>Jesse Agent</title>
   <style>
     body { margin: 0; padding: 16px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); }
@@ -845,6 +871,13 @@ function renderChatHtml(webview) {
     .msg { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .user { background: var(--vscode-input-background); }
     .assistant { background: var(--vscode-editor-inactiveSelectionBackground); }
+    .assistant p { margin: 0 0 8px; }
+    .assistant p:last-child { margin-bottom: 0; }
+    .assistant h1, .assistant h2, .assistant h3 { margin: 4px 0 8px; line-height: 1.25; }
+    .assistant ul { margin: 4px 0 8px 18px; padding: 0; }
+    .assistant li { margin: 2px 0; }
+    .assistant .code-block { margin: 8px 0; padding: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); overflow: auto; white-space: pre; }
+    .assistant .code-block code { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
     .tool, .status, .error, .log { font-size: 12px; color: var(--vscode-descriptionForeground); }
     .tool-card details, .sessions-card details { margin: 0; }
     .tool-card summary, .sessions-card summary { cursor: pointer; user-select: none; font-weight: 600; }
@@ -912,8 +945,8 @@ function renderChatHtml(webview) {
     <button id="dev-eval" class="dev-only">Eval</button>
   </div>
   <div class="workspace-strip">
-    <div><strong>Workspace</strong>: <span id="workspace">detecting...</span> <button id="workspace-change" class="link-button">Change</button></div>
-    <div><strong>Session</strong>: <span id="session">none</span> · <strong>Status</strong>: <span id="run-status">idle</span></div>
+    <div><strong>Workspace</strong>: <span id="workspace">${escapeHtml(initialWorkspace)}</span> <button id="workspace-change" class="link-button">Change</button></div>
+    <div><strong>Session</strong>: <span id="session">${escapeHtml(initialSession)}</span> · <strong>Status</strong>: <span id="run-status">idle</span> · <strong>UI</strong>: <span id="ui-status">html</span></div>
   </div>
   <div id="messages" class="messages"></div>
   <div class="composer">
@@ -923,6 +956,9 @@ function renderChatHtml(webview) {
     </div>
   </div>
   <script nonce="${nonce}">
+    window.addEventListener('error', event => setUiStatus('script error: ' + event.message));
+    window.addEventListener('unhandledrejection', event => setUiStatus('script error: ' + String(event.reason || event)));
+    setUiStatus('script booting');
     const vscode = acquireVsCodeApi();
     const messages = document.getElementById('messages');
     const prompt = document.getElementById('prompt');
@@ -930,12 +966,17 @@ function renderChatHtml(webview) {
     const workspaceLabel = document.getElementById('workspace');
     const sessionLabel = document.getElementById('session');
     const runStatus = document.getElementById('run-status');
+    const uiStatus = document.getElementById('ui-status');
+    const initialServerState = ${initialStateJson};
     let currentAssistant = null;
     let lastToolCard = null;
     let currentTimeline = null;
     let currentToolCall = null;
     let currentRunChangedFiles = new Map();
     let isRunning = false;
+
+    setUiStatus('script ready');
+    updateServerState(initialServerState);
 
     askButton.addEventListener('click', () => isRunning ? vscode.postMessage({ type: 'cancel' }) : ask());
     document.getElementById('new-chat').addEventListener('click', () => vscode.postMessage({ type: 'newSession' }));
@@ -948,6 +989,19 @@ function renderChatHtml(webview) {
     prompt.addEventListener('keydown', event => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !isRunning) ask();
     });
+    postReady();
+    setTimeout(postReady, 100);
+    setTimeout(postReady, 500);
+
+    function postReady() {
+      setUiStatus('ready sent');
+      vscode.postMessage({ type: 'ready' });
+    }
+
+    function setUiStatus(text) {
+      const target = document.getElementById('ui-status');
+      if (target) target.textContent = text;
+    }
 
     function ask() {
       const text = prompt.value.trim();
@@ -1013,7 +1067,7 @@ function renderChatHtml(webview) {
       if (!body) return;
       const text = body.textContent || '';
       body.textContent = '';
-      renderLinkedText(body, text);
+      renderAssistantMarkdown(body, text);
     }
 
     function updateServerState(message) {
@@ -1022,6 +1076,7 @@ function renderChatHtml(webview) {
       if (message.sessionId) sessionLabel.textContent = 'active' + (message.messageCount ? ' · ' + message.messageCount + ' messages' : '');
       document.body.classList.toggle('dev', message.devMode === true);
       updateWorkspaceChangeVisibility(message.workspaceOptions || []);
+      setUiStatus('connected');
       if (isRunning && message.text) {
         const meta = [message.permissionMode, message.cwd || message.workspaceRoot].filter(Boolean).join(' · ');
         addTimelineEvent('running', 'Connected to local agent', meta || message.text);
@@ -1536,7 +1591,8 @@ function renderChatHtml(webview) {
       const item = document.createElement('div');
       item.className = 'msg ' + kind;
       const body = document.createElement('div');
-      renderLinkedText(body, text || '');
+      if (kind === 'assistant') renderAssistantMarkdown(body, text || '');
+      else renderLinkedText(body, text || '');
       item.appendChild(body);
       if (context) {
         const meta = document.createElement('div');
@@ -1547,6 +1603,100 @@ function renderChatHtml(webview) {
       messages.appendChild(item);
       window.scrollTo(0, document.body.scrollHeight);
       return item;
+    }
+
+    function renderAssistantMarkdown(container, text) {
+      const lines = String(text || '').replace(/\\r\\n/g, '\\n').split('\\n');
+      let paragraph = [];
+      let list = null;
+      let codeBlock = null;
+
+      function flushParagraph() {
+        if (!paragraph.length) return;
+        const p = document.createElement('p');
+        renderInlineMarkdown(p, paragraph.join(' '));
+        container.appendChild(p);
+        paragraph = [];
+      }
+
+      function flushList() {
+        if (!list) return;
+        container.appendChild(list);
+        list = null;
+      }
+
+      function flushCodeBlock() {
+        if (!codeBlock) return;
+        const pre = document.createElement('pre');
+        pre.className = 'code-block';
+        const code = document.createElement('code');
+        code.textContent = codeBlock.join('\\n');
+        pre.appendChild(code);
+        container.appendChild(pre);
+        codeBlock = null;
+      }
+
+      for (const rawLine of lines) {
+        const line = rawLine.trimEnd();
+        const codeFence = line.startsWith('\`\`\`') && line.slice(3).trim().match(/^[A-Za-z0-9_-]*$/);
+        if (codeBlock) {
+          if (codeFence) {
+            flushCodeBlock();
+          } else {
+            codeBlock.push(rawLine);
+          }
+          continue;
+        }
+        if (codeFence) {
+          flushParagraph();
+          flushList();
+          codeBlock = [];
+          continue;
+        }
+        const heading = line.match(/^(#{1,3})\\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          flushList();
+          const level = heading[1].length;
+          const el = document.createElement('h' + level);
+          renderInlineMarkdown(el, heading[2]);
+          container.appendChild(el);
+          continue;
+        }
+        const listItem = line.match(/^[-*]\s+(.+)$/);
+        if (listItem) {
+          flushParagraph();
+          if (!list) list = document.createElement('ul');
+          const li = document.createElement('li');
+          renderInlineMarkdown(li, listItem[1]);
+          list.appendChild(li);
+          continue;
+        }
+        if (!line.trim()) {
+          flushParagraph();
+          flushList();
+          continue;
+        }
+        paragraph.push(line.trim());
+      }
+
+      flushParagraph();
+      flushList();
+      if (codeBlock) flushCodeBlock();
+    }
+
+    function renderInlineMarkdown(container, text) {
+      const pattern = /(\\*\\*[^*]+\\*\\*)/g;
+      const parts = String(text || '').split(pattern).filter(Boolean);
+      for (const part of parts) {
+        if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+          const strong = document.createElement('strong');
+          renderLinkedText(strong, part.slice(2, -2));
+          container.appendChild(strong);
+        } else {
+          renderLinkedText(container, part);
+        }
+      }
     }
 
     function renderLinkedText(container, text) {

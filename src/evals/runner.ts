@@ -10,6 +10,7 @@
 
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -73,6 +74,7 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runSearchFallbackEval,
     runReadFileRangeEval,
     runImplementationTraceGuidanceEval,
+    runResponsesStreamErrorSurfaceEval,
     runIdeTimelineUiEval,
     runVsCodePackagingConfigEval,
   ]
@@ -661,8 +663,10 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
   return runCase('ide-timeline-ui', async checks => {
     const source = await readFile(join(getOriginalProjectRoot(), 'vscode-extension', 'extension.js'), 'utf8')
     const script = extractWebviewScript(source)
+    const generatedScript = extractGeneratedWebviewScript(source)
 
     check(checks, 'webview script parses', parsesAsScript(script))
+    check(checks, 'generated webview script parses', parsesAsScript(generatedScript))
     check(checks, 'timeline card exists', source.includes('.timeline-card') && source.includes('Run timeline'))
     check(checks, 'timeline records tool events', (
       source.includes('Tool started') &&
@@ -679,6 +683,26 @@ async function runIdeTimelineUiEval(): Promise<EvalResult> {
     check(checks, 'dev controls are hidden behind dev mode', source.includes('dev-only') && source.includes("message.devMode === true"))
     check(checks, 'changed files summary exists', source.includes('Files changed in this run') && source.includes('recordChangedFileFromTool'))
     check(checks, 'tool results use linked text renderer', source.includes('renderLinkedText(result') && source.includes('Dockerfile'))
+    check(checks, 'webview sends ready handshake for workspace state', source.includes("type: 'ready'") && source.includes('syncWorkspaceState()'))
+    check(checks, 'webview message listener is registered before html is assigned', (
+      source.indexOf('chatPanel.webview.onDidReceiveMessage') > -1 &&
+      source.indexOf('chatPanel.webview.html = renderChatHtml') > source.indexOf('chatPanel.webview.onDidReceiveMessage')
+    ))
+    check(checks, 'webview retries ready handshake', source.includes('setTimeout(postReady, 100)') && source.includes('setTimeout(postReady, 500)'))
+    check(checks, 'webview embeds initial server state in html', source.includes('initialServerState') && source.includes('serverStatePayload()'))
+    check(checks, 'webview exposes ui bootstrap status', source.includes('ui-status') && source.includes("'script booting'") && source.includes("'script ready'") && source.includes("'connected'"))
+    check(checks, 'webview surfaces script errors in ui', source.includes("'script error: '") && source.includes('unhandledrejection'))
+    check(checks, 'assistant replies use markdown renderer', source.includes('renderAssistantMarkdown(body') && source.includes('finalizeAssistantLinks'))
+  })
+}
+
+async function runResponsesStreamErrorSurfaceEval(): Promise<EvalResult> {
+  return runCase('responses-stream-error-surface', async checks => {
+    const source = await readFile(join(getOriginalProjectRoot(), 'src', 'llm.ts'), 'utf8')
+
+    check(checks, 'stream parser handles response.failed events', source.includes("event.type === 'response.failed'"))
+    check(checks, 'stream parser reads nested error.message', source.includes('event.response?.error') && source.includes('error?.message'))
+    check(checks, 'stream parser preserves error details', source.includes('error?.code') && source.includes('error?.type') && source.includes('error?.param'))
   })
 }
 
@@ -879,6 +903,24 @@ function extractPromptSection(prompt: string, heading: string): string {
 
 function extractWebviewScript(source: string): string {
   const match = /<script nonce="\$\{nonce\}">([\s\S]*?)<\/script>/.exec(source)
+  return (match?.[1] ?? '').replace('${initialStateJson}', '{}')
+}
+
+function extractGeneratedWebviewScript(source: string): string {
+  const moduleObj = { exports: {} as Record<string, unknown> }
+  const requireFromHere = createRequire(import.meta.url)
+  let fakeVscode: unknown
+  fakeVscode = new Proxy(function () {}, {
+    get: () => fakeVscode,
+    apply: () => fakeVscode,
+  })
+  const fakeRequire = (name: string): unknown => name === 'vscode' ? fakeVscode : requireFromHere(name)
+  const load = new Function('require', 'module', 'exports', `${source}\nmodule.exports.__renderChatHtml = renderChatHtml;`)
+  load(fakeRequire, moduleObj, moduleObj.exports)
+  const renderChatHtml = moduleObj.exports.__renderChatHtml
+  if (typeof renderChatHtml !== 'function') return ''
+  const html = renderChatHtml({ cspSource: 'vscode-resource:' }, { workspaceRoot: '/tmp/workspace', workspaceOptions: [] })
+  const match = /<script[^>]*>([\s\S]*?)<\/script>/.exec(String(html))
   return match?.[1] ?? ''
 }
 

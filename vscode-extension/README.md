@@ -43,7 +43,7 @@ From the repository root:
 npm run package:vscode
 ```
 
-The packaged extension is written to `dist/jesse-agent-vscode-0.0.1.vsix`.
+The packaged extension is written to `dist/jesse-agent-vscode-0.0.5.vsix`.
 
 ## Architecture
 

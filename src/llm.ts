@@ -352,8 +352,8 @@ async function* streamResponsesLLM(
             yield { type: 'text_delta', text: event.delta }
           } else if (event.type === 'response.completed' && event.response) {
             completed = event.response
-          } else if (event.type === 'error') {
-            throw new Error(event.message ?? 'Responses API 流式事件返回错误')
+          } else if (event.type === 'error' || event.type === 'response.failed') {
+            throw new Error(formatResponsesStreamError(event))
           }
         }
       }
@@ -509,6 +509,7 @@ type ResponsesInputItem =
 interface ResponsesResponse {
   output_text?: string
   output?: ResponsesOutputItem[]
+  error?: ResponsesError
 }
 
 type ResponsesOutputItem =
@@ -529,6 +530,23 @@ interface ResponsesStreamEvent {
   delta?: string
   response?: ResponsesResponse
   message?: string
+  error?: ResponsesError
+}
+
+interface ResponsesError {
+  code?: string
+  message?: string
+  type?: string
+  param?: string
+}
+
+function formatResponsesStreamError(event: ResponsesStreamEvent): string {
+  const error = event.error ?? event.response?.error
+  const message = event.message ?? error?.message ?? 'Responses API 流式事件返回错误'
+  const details = [error?.code, error?.type, error?.param]
+    .filter((part): part is string => Boolean(part))
+    .join(' · ')
+  return details ? `${message} (${details})` : message
 }
 
 /**
