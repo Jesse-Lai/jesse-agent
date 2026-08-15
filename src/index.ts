@@ -16,7 +16,7 @@
 
 import { createInterface } from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
-import type { Message } from './llm.js'
+import { getLLMApiMode, getLLMModel, shutdownLLM, type Message } from './llm.js'
 import { runAgent } from './loop.js'
 import { buildSystemPrompt } from './prompt.js'
 import { loadProjectMemoryContext } from './memory.js'
@@ -153,6 +153,7 @@ async function shutdown(reason: SessionEndReason): Promise<void> {
   await stopAllRunningTasks()
   await closeActiveSession(reason)
   await closeMcpRuntime()
+  await shutdownLLM()
 }
 
 // ============================================================================
@@ -180,8 +181,8 @@ async function main(): Promise<void> {
   const openedSession = await openSession({
     resumeId: RESUME_SESSION,
     continueLatest: CONTINUE_SESSION,
-    model: process.env.LLM_MODEL ?? 'gpt-4o-2024-11-20',
-    apiMode: process.env.LLM_API_MODE ?? (process.env.LLM_BASE_URL?.includes('/responses') ? 'responses' : 'chat_completions'),
+    model: getLLMModel(),
+    apiMode: getLLMApiMode(),
   })
   const session = openedSession.transcript
   activeSession = session

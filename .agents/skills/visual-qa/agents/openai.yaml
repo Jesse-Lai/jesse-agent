@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visual QA Gate"
+  short_description: "Screenshot-gated visual change verification"
+  default_prompt: "Use $visual-qa to verify this Jesse Agent visual change before handoff."

@@ -18,7 +18,7 @@ import { promisify } from 'node:util'
 import { Script } from 'node:vm'
 import { runAgent, type AgentEvent } from '../loop.js'
 import type { LLMStreamer, Message, ToolCall } from '../llm.js'
-import type { Tool } from '../types.js'
+import type { Tool, ToolOutput } from '../types.js'
 import { setPermissionMode } from '../permissionMode.js'
 import { rememberSessionAllowRule } from '../permissions.js'
 import { getOriginalProjectRoot, getProjectRoot, setProjectRoot } from '../workingDirectory.js'
@@ -29,13 +29,16 @@ import { runCommandTool } from '../tools/runCommand.js'
 import { writeFileTool } from '../tools/writeFile.js'
 import { taskContinueTool } from '../tools/taskContinue.js'
 import { grepCodeTool } from '../tools/grepCode.js'
+import { microsoftGraphTool } from '../tools/microsoftGraph.js'
 import { restoreBackgroundAgentTask } from '../tools/agent.js'
 import { createAgentWorktree, finishAgentWorktree } from '../worktrees.js'
 import { continueAgentTask, readTaskOutput, startAgentTask } from '../tasks.js'
 import { createAgentRuntimeContext } from '../runtimeContext.js'
 import { buildSystemPrompt } from '../prompt.js'
 import { defaultRgIgnoreArgs, fallbackGlobFiles, fallbackGrepCode } from '../tools/searchFallback.js'
-import { classifyBashCommand } from '../bashClassifier.js'
+import { classifyBashCommand, isLikelyLongRunningCommand } from '../bashClassifier.js'
+import { generateSessionTitle, normalizeSessionTitle } from '../sessionTitle.js'
+import { sanitizeToolCallHistory } from '../messageHistory.js'
 
 const EVAL_TOOLS: Tool[] = [readFileTool, editFileTool, runCommandTool]
 const execFileAsync = promisify(execFile)
@@ -61,6 +64,8 @@ type ScriptedStep =
 export async function runEvalSuite(): Promise<EvalResult[]> {
   const cases: Array<() => Promise<EvalResult>> = [
     runValidationEval,
+    runInterruptedToolHistoryEval,
+    runMicrosoftGraphToolContractEval,
     runReadBeforeWriteEval,
     runReadEditVerifyEval,
     runIdeApprovalAllowsEditEval,
@@ -79,11 +84,13 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
     runReadFileRangeEval,
     runImplementationTraceGuidanceEval,
     runAgentLoopOptionalMaxTurnsEval,
+    runSessionTitleGenerationEval,
     runResponsesStreamErrorSurfaceEval,
     runIdeTimelineUiEval,
     runIdeAutoCompactEventEval,
     runVsCodeWorkspaceDetectionEval,
     runVsCodePackagingConfigEval,
+    runDesktopAppMvpEval,
   ]
 
   const results: EvalResult[] = []
@@ -92,6 +99,42 @@ export async function runEvalSuite(): Promise<EvalResult[]> {
   }
 
   return results
+}
+
+async function runInterruptedToolHistoryEval(): Promise<EvalResult> {
+  return runCase('interrupted-tool-history-recovery', async checks => {
+    const interruptedCall: ToolCall = {
+      id: 'call_interrupted',
+      type: 'function',
+      function: { name: 'run_command', arguments: '{}' },
+    }
+    const completedCall: ToolCall = {
+      id: 'call_completed',
+      type: 'function',
+      function: { name: 'microsoft_graph', arguments: '{}' },
+    }
+    const messages: Message[] = [
+      { role: 'system', content: 'system' },
+      { role: 'user', content: 'Start a dev server.' },
+      { role: 'assistant', content: null, tool_calls: [interruptedCall] },
+      { role: 'user', content: 'Read Teams instead.' },
+      { role: 'tool', content: 'orphaned', tool_call_id: 'call_orphaned' },
+      { role: 'assistant', content: null, tool_calls: [completedCall] },
+      { role: 'tool', content: 'Graph result', tool_call_id: completedCall.id },
+      { role: 'assistant', content: 'Done.' },
+    ]
+
+    const sanitized = sanitizeToolCallHistory(messages)
+    const serialized = JSON.stringify(sanitized)
+
+    check(checks, 'interrupted assistant tool call is removed', !serialized.includes(interruptedCall.id), serialized)
+    check(checks, 'orphan tool result is removed', !serialized.includes('call_orphaned'), serialized)
+    check(checks, 'the user request after interruption is retained', serialized.includes('Read Teams instead.'), serialized)
+    check(checks, 'complete tool call and result are retained', (
+      serialized.includes(completedCall.id) && serialized.includes('Graph result')
+    ), serialized)
+    check(checks, 'input history is not mutated', messages.length === 8, String(messages.length))
+  })
 }
 
 async function runValidationEval(): Promise<EvalResult> {
@@ -106,10 +149,50 @@ async function runValidationEval(): Promise<EvalResult> {
     ])
 
     const result = toolResult(events, 'read_file')
+    const approvalRequests: string[] = []
+    const root = getOriginalProjectRoot()
+    const longRunningResult = await executeTool('run_command', { command: 'npm run dev -w client', cwd: '.' }, {
+      context: createAgentRuntimeContext({
+        projectRoot: root,
+        cwd: root,
+        originalProjectRoot: root,
+        approvalHandler: async request => {
+          approvalRequests.push(request.toolName)
+          return 'reject_once'
+        },
+      }),
+    })
     check(checks, 'read_file was attempted', toolStarts(events).includes('read_file'))
     check(checks, 'missing required arg was rejected', result?.ok === false && result.content.includes('参数校验失败'), result?.content)
+    check(checks, 'long-running dev command is rejected before approval', (
+      longRunningResult.ok === false &&
+      longRunningResult.content.includes('run_background_command') &&
+      approvalRequests.length === 0
+    ), `${longRunningResult.content}\napprovals=${approvalRequests.join(',')}`)
     check(checks, 'script reached final answer', finalText(events).includes('VERDICT: PASS'))
     check(checks, 'script consumed every fake model step', unusedSteps === 0, `${unusedSteps} unused step(s)`)
+  })
+}
+
+async function runMicrosoftGraphToolContractEval(): Promise<EvalResult> {
+  return runCase('microsoft-graph-tool-contract', async checks => {
+    const actionSchema = microsoftGraphTool.parameters.properties.action
+    const actions = Array.isArray(actionSchema?.enum) ? actionSchema.enum : []
+    const result = await executeTool('microsoft_graph', {
+      action: 'not_an_action',
+      chatId: '',
+      chatName: '',
+      date: '',
+      query: '',
+      path: '',
+    }, { tools: [microsoftGraphTool] })
+
+    check(checks, 'Graph tool is read-only', microsoftGraphTool.isReadOnly === true)
+    check(checks, 'Teams read action is exposed', actions.includes('get_teams_chat_messages'))
+    check(checks, 'mail list action is exposed', actions.includes('list_mail_messages'))
+    check(checks, 'mail detail action is exposed', actions.includes('get_mail_message'))
+    check(checks, 'optional empty strings pass validation', !result.content.includes('参数校验失败'), result.content)
+    check(checks, 'tool exceptions surface as failed results', result.ok === false && result.content.includes('Unknown microsoft_graph action'), result.content)
   })
 }
 
@@ -407,6 +490,11 @@ async function runBashReadOnlyClassifierEval(): Promise<EvalResult> {
     check(checks, 'head without a file still needs approval', classifyBashCommand('head -n 20').risk === 'needs_approval')
     check(checks, 'redirection still needs approval', classifyBashCommand('cat package.json > out.txt').risk === 'needs_approval')
     check(checks, 'absolute paths still need approval', classifyBashCommand('cat /etc/passwd').risk === 'needs_approval')
+    check(checks, 'dev server commands are recognized as long-running', (
+      isLikelyLongRunningCommand('npm run dev -w client') &&
+      isLikelyLongRunningCommand('tsx watch src/index.ts') &&
+      !isLikelyLongRunningCommand('npm run test')
+    ))
     check(checks, 'run_command description nudges file reads to read_file', runCommandSource.includes('读取明确文件请优先用 read_file'), runCommandSource)
   })
 }
@@ -519,7 +607,7 @@ async function runBackgroundAgentWorktreeContextEval(): Promise<EvalResult> {
           path: 'agent-output.txt',
           content: 'background worktree change\n',
         }, context)
-        task.write(`${writeResult}\n`)
+        task.write(`${toolOutputText(writeResult)}\n`)
         const cleanup = await finishAgentWorktree(session)
         task.write(`Worktree status: ${cleanup.status}\n`)
         task.write(`Worktree changes: ${cleanup.changedFiles} file(s), ${cleanup.commits} commit(s)\n`)
@@ -549,10 +637,10 @@ async function runBackgroundAgentContinuationEval(): Promise<EvalResult> {
     })
 
     const initial = await readTaskOutput(started.id, { block: true, timeoutMs: 1_000 })
-    const continuedText = await taskContinueTool.execute({
+    const continuedText = toolOutputText(await taskContinueTool.execute({
       task_id: started.id,
       prompt: 'follow up question',
-    })
+    }))
     const continued = await readTaskOutput(started.id, { block: true, timeoutMs: 1_000 })
 
     check(checks, 'initial task completed', initial.snapshot.status === 'completed', initial.snapshot.status)
@@ -675,11 +763,11 @@ async function runSearchFallbackEval(): Promise<EvalResult> {
     process.env.PATH = emptyPathDir
     let toolFileResult: string
     try {
-      toolFileResult = await grepCodeTool.execute({
+      toolFileResult = toolOutputText(await grepCodeTool.execute({
         pattern: 'task_continue',
         path: 'src/tools/taskContinue.ts',
         glob: '*.ts',
-      }, context)
+      }, context))
     } finally {
       process.env.PATH = originalPath
     }
@@ -709,11 +797,11 @@ async function runReadFileRangeEval(): Promise<EvalResult> {
       cwd: realRoot,
       originalProjectRoot: realRoot,
     })
-    const result = await readFileTool.execute({
+    const result = toolOutputText(await readFileTool.execute({
       path: 'range.txt',
       start_line: 2,
       max_lines: 2,
-    }, context)
+    }, context))
 
     check(checks, 'range header reports selected lines', result.includes('--- 2-3 / 4 lines ---'), result)
     check(checks, 'range includes requested lines', result.includes('two\nthree'), result)
@@ -751,6 +839,11 @@ async function runImplementationTraceGuidanceEval(): Promise<EvalResult> {
     check(checks, 'prompt prefers read_file over shell file reads', (
       prompt.includes('读取一个明确文件时用 read_file') &&
       prompt.includes('不要用 run_command 执行 cat/head/tail')
+    ), extractPromptSection(prompt, '# 工具使用'))
+    check(checks, 'prompt routes dev servers to background commands', (
+      prompt.includes('npm run dev') &&
+      prompt.includes('run_background_command') &&
+      prompt.includes('长期运行命令')
     ), extractPromptSection(prompt, '# 工具使用'))
   })
 }
@@ -893,6 +986,30 @@ async function runAgentLoopOptionalMaxTurnsEval(): Promise<EvalResult> {
   })
 }
 
+async function runSessionTitleGenerationEval(): Promise<EvalResult> {
+  return runCase('session-title-generation', async checks => {
+    const steps: ScriptedStep[] = [
+      { type: 'text', text: '{"title":"检查系统提示词"}' },
+    ]
+    const title = await generateSessionTitle(
+      '查看这个 agent 的 system prompt，并解释每部分作用',
+      AbortSignal.timeout(1_000),
+      createScriptedLLM(steps),
+    )
+    const root = getOriginalProjectRoot()
+    const sessionSource = await readFile(join(root, 'src', 'session.ts'), 'utf8')
+    const ideServerSource = await readFile(join(root, 'src', 'ideServer.ts'), 'utf8')
+
+    check(checks, 'model output becomes a concise session title', title === '检查系统提示词', String(title))
+    check(checks, 'plain title fallback is normalized', normalizeSessionTitle('Title: Fix mobile login button.') === 'Fix mobile login button')
+    check(checks, 'session title generation consumed its scripted response', steps.length === 0, `${steps.length} unused step(s)`)
+    check(checks, 'AI title is persisted separately from conversation messages', sessionSource.includes("type: 'session_title'") && sessionSource.includes('appendTitle'))
+    check(checks, 'AI title metadata does not reorder session history', sessionSource.includes("record.type !== 'session_title'"))
+    check(checks, 'opening a session does not reorder session history', sessionSource.includes("record.type !== 'session_resume'"))
+    check(checks, 'IDE generates a title only for the first user turn', ideServerSource.includes('shouldGenerateTitle') && ideServerSource.includes('generateAndPersistSessionTitle'))
+  })
+}
+
 async function runVsCodePackagingConfigEval(): Promise<EvalResult> {
   return runCase('vscode-packaging-config', async checks => {
     const root = getOriginalProjectRoot()
@@ -917,6 +1034,148 @@ async function runVsCodePackagingConfigEval(): Promise<EvalResult> {
     ))
     check(checks, 'extension passes LLM settings to server env', extensionSource.includes('llmEnvOverrides()') && extensionSource.includes('LLM_BASE_URL') && extensionSource.includes('LLM_MODEL'))
     check(checks, 'README documents packaged VSIX version', extensionReadme.includes('jesse-agent-vscode-0.0.7.vsix'))
+  })
+}
+
+async function runDesktopAppMvpEval(): Promise<EvalResult> {
+  return runCase('desktop-app-mvp', async checks => {
+    const root = getOriginalProjectRoot()
+    const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
+    const serverSource = await readFile(join(root, 'src', 'desktopServer.ts'), 'utf8')
+    const html = await readFile(join(root, 'desktop-app', 'index.html'), 'utf8')
+    const appSource = await readFile(join(root, 'desktop-app', 'src', 'App.tsx'), 'utf8')
+    const presentationSource = await readFile(join(root, 'desktop-app', 'src', 'presentation.ts'), 'utf8')
+    const typesSource = await readFile(join(root, 'desktop-app', 'src', 'types.ts'), 'utf8')
+    const sidebarSource = await readFile(join(root, 'desktop-app', 'src', 'components', 'Sidebar.tsx'), 'utf8')
+    const conversationSource = await readFile(join(root, 'desktop-app', 'src', 'components', 'Conversation.tsx'), 'utf8')
+    const composerSource = await readFile(join(root, 'desktop-app', 'src', 'components', 'Composer.tsx'), 'utf8')
+    const splitterSource = await readFile(join(root, 'desktop-app', 'src', 'components', 'Splitter.tsx'), 'utf8')
+    const reactSource = [appSource, sidebarSource, conversationSource, composerSource, splitterSource].join('\n')
+    const squircleSource = await readFile(join(root, 'desktop-app', 'squircle.js'), 'utf8')
+    const css = await readFile(join(root, 'desktop-app', 'styles.css'), 'utf8')
+    const readme = await readFile(join(root, 'README.md'), 'utf8')
+    const scripts = packageJson.scripts as Record<string, unknown> | undefined
+    const dependencies = packageJson.dependencies as Record<string, unknown> | undefined
+    const devDependencies = packageJson.devDependencies as Record<string, unknown> | undefined
+
+    check(checks, 'root package has desktop script', typeof scripts?.desktop === 'string' && String(scripts.desktop).includes('src/desktopServer.ts'))
+    check(checks, 'desktop UI uses React TypeScript and Vite', (
+      typeof dependencies?.react === 'string' &&
+      typeof dependencies?.['react-dom'] === 'string' &&
+      typeof devDependencies?.vite === 'string' &&
+      typeof scripts?.['desktop:build'] === 'string' &&
+      html.includes('src="/src/main.tsx"')
+    ))
+    check(checks, 'desktop server reuses IDE server backend', serverSource.includes("['run', 'ide:server', '--silent']") && serverSource.includes('proxyToIdeServer'))
+    check(checks, 'desktop server keeps project registry local', serverSource.includes('desktop-projects.json') && serverSource.includes('registerProject'))
+    check(checks, 'desktop project picker preserves selected workspace root', (
+      serverSource.includes('const resolved = resolve(projectPath)') &&
+      serverSource.includes('projectFromPath(resolved, source)') &&
+      !serverSource.includes('inferSingleNestedProjectRoot')
+    ))
+    check(checks, 'desktop React app exposes project tree composer and splitter', reactSource.includes('className="project-list"') && reactSource.includes('className="composer"') && reactSource.includes('className="splitter"'))
+    check(checks, 'desktop topbar hides idle status label', !html.includes('id="status"'))
+    check(checks, 'desktop app supports streaming ask and approvals', appSource.includes('streamAsk({') && appSource.includes("postJson('/api/approval'"))
+    check(checks, 'desktop app renders approval prompt at the composer', (
+      appSource.includes('pendingApproval') &&
+      composerSource.includes('approval-prompt') &&
+      css.includes('.approval-prompt') &&
+      !conversationSource.includes('ApprovalCard')
+    ))
+    check(checks, 'desktop app renders a visible activity stream instead of a timeline card', (
+      typesSource.includes('interface ActivityItem') &&
+      typesSource.includes("type: 'activity'") &&
+      appSource.includes('formatActivity') &&
+      conversationSource.includes('function ActivityStream') &&
+      conversationSource.includes('className="message activity-stream"') &&
+      css.includes('.activity-stream') &&
+      !conversationSource.includes('Run timeline')
+    ))
+    check(checks, 'desktop activity formatter uses short user-facing labels', (
+      presentationSource.includes('export function formatActivity') &&
+      presentationSource.includes("return 'Read files'") &&
+      presentationSource.includes("return 'Searched code'") &&
+      presentationSource.includes("return 'Edited a file'") &&
+      presentationSource.includes("return 'Ran a command'") &&
+      presentationSource.includes("label: 'Waiting for approval'") &&
+      presentationSource.includes("label: 'Approval resolved'")
+    ))
+    check(checks, 'desktop activity stream hides raw tool lifecycle and command text', (
+      !appSource.includes('Tool started') &&
+      !appSource.includes('Tool finished') &&
+      !appSource.includes('Tool failed') &&
+      !appSource.includes("type: 'command'") &&
+      !appSource.includes("type: 'changed-files'") &&
+      !conversationSource.includes('TimelineCard') &&
+      !conversationSource.includes('CommandCard') &&
+      !conversationSource.includes('ChangedFilesCard') &&
+      !conversationSource.includes('timeline-current') &&
+      !css.includes('.command-card') &&
+      !presentationSource.includes('summarizeToolAction') &&
+      !presentationSource.includes('Run ${stringArg(args.command')
+    ))
+    check(checks, 'desktop preserves visible progress notes before tool calls', (
+      appSource.includes('currentAssistantTextRef') &&
+      appSource.includes('function freezeAssistantProgressNote') &&
+      appSource.includes('freezeAssistantProgressNote(targetKey)')
+    ))
+    check(checks, 'desktop app supports resizable sidebar', splitterSource.includes('setSidebarWidth') && css.includes('grid-template-columns: var(--sidebar-width'))
+    check(checks, 'desktop app nests sessions under projects', appSource.includes('sessionsByProject') && sidebarSource.includes('project-sessions'))
+    check(checks, 'desktop sessions have selected state without duplicate preview line', sidebarSource.includes('session.id === props.activeSessionId') && !reactSource.includes('session-preview'))
+    check(checks, 'desktop switching sessions in one project keeps the existing list order', (
+      appSource.includes('async function resumeSession(projectPath: string, nextSessionId: string)') &&
+      appSource.includes("if (activeScopeRef.current !== 'project' || activeProjectRef.current !== projectPath)")
+    ))
+    check(checks, 'desktop centers the composer until the conversation starts', (
+      (
+        appSource.includes("conversation.length === 0 ? ' empty-conversation' : ''") ||
+        (appSource.includes('const isEmptyConversation = conversation.length === 0') && appSource.includes("isEmptyConversation ? ' empty-conversation' : ''"))
+      ) &&
+      css.includes('.main.empty-conversation .composer') &&
+      appSource.includes('Jesse, what should we work on?') &&
+      css.includes('.main.empty-conversation .empty-greeting')
+    ))
+    check(checks, 'desktop does not duplicate the session title above the conversation', (
+      !html.includes('id="workspace"') &&
+      !reactSource.includes('activeSession?.title')
+    ))
+    check(checks, 'desktop top plus adds project without bottom add form', sidebarSource.includes('title="Add project"') && !html.includes('id="add-project"') && appSource.includes('async function addProject()'))
+    check(checks, 'desktop add project uses the native folder picker instead of a path prompt', (
+      appSource.includes("postJson<{ canceled?: boolean; projectPath?: string }>('/api/projects/pick', {})") &&
+      !appSource.includes('Paste the absolute path') &&
+      serverSource.includes("url.pathname === '/api/projects/pick'") &&
+      serverSource.includes('choose folder with prompt "Choose a project folder"')
+    ))
+    check(checks, 'desktop project row plus starts a new chat', (
+      sidebarSource.includes('className="project-new-chat-button"') &&
+      sidebarSource.includes('props.onNewProjectChat(project.path)')
+    ))
+    check(checks, 'desktop project menu supports persistent rename and remove', (
+      sidebarSource.includes('Rename project') &&
+      !sidebarSource.includes('<MenuButton label="New chat"') &&
+      serverSource.includes("req.method === 'PATCH' && url.pathname === '/api/projects'") &&
+      serverSource.includes('async function renameProject') &&
+      serverSource.includes("req.method === 'DELETE' && url.pathname === '/api/projects'")
+    ))
+    check(checks, 'desktop project menu closes when clicking elsewhere', (
+      sidebarSource.includes("document.addEventListener('click'") &&
+      sidebarSource.includes("target.closest('.project-menu, .project-menu-button')")
+    ))
+    check(checks, 'desktop uses project terminology in user-facing navigation', sidebarSource.includes('>Projects</span>') && !reactSource.includes('>Workspaces</'))
+    check(checks, 'desktop css has responsive layout', css.includes('@media (max-width: 760px)'))
+    check(checks, 'desktop rounded surfaces use figma squircle', (
+      typeof dependencies?.['figma-squircle'] === 'string' &&
+      html.includes('src="/squircle.js"') &&
+      squircleSource.includes("from 'figma-squircle'") &&
+      squircleSource.includes('getSvgPath') &&
+      squircleSource.includes('ResizeObserver')
+    ))
+    check(checks, 'README documents desktop and Companion launch paths', (
+      readme.includes('Jesse Companion for macOS') &&
+      readme.includes('npm run companion:package') &&
+      readme.includes('npm run desktop') &&
+      readme.includes('127.0.0.1')
+    ))
   })
 }
 
@@ -1074,6 +1333,10 @@ async function pathExists(path: string): Promise<boolean> {
 
 function check(checks: EvalCheck[], name: string, passed: boolean, details?: string): void {
   checks.push({ name, passed, details })
+}
+
+function toolOutputText(output: string | ToolOutput): string {
+  return typeof output === 'string' ? output : output.content
 }
 
 function toolStarts(events: AgentEvent[]): string[] {

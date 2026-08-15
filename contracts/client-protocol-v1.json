@@ -1,0 +1,53 @@
+{
+  "project": {
+    "name": "JesseAgent",
+    "path": "/tmp/JesseAgent",
+    "lastUsedAt": "2026-08-13T00:00:00.000Z",
+    "source": "manual"
+  },
+  "session": {
+    "id": "session-contract-v1",
+    "title": "Contract fixture",
+    "lastUserMessage": "Keep both clients in sync",
+    "metadata": {
+      "origin": "mac",
+      "executionRoot": "/tmp/JesseAgent",
+      "workspace": {
+        "id": "workspace-contract-v1",
+        "kind": "existing",
+        "path": "/tmp/JesseAgent",
+        "displayName": "JesseAgent"
+      }
+    }
+  },
+  "run": {
+    "id": "run-contract-v1",
+    "sessionId": "session-contract-v1",
+    "workspaceRoot": "/tmp/JesseAgent",
+    "executionRoot": "/tmp/JesseAgent",
+    "status": "waiting_approval",
+    "createdAt": "2026-08-13T00:00:00.000Z",
+    "updatedAt": "2026-08-13T00:00:01.000Z"
+  },
+  "envelope": {
+    "cursor": 7,
+    "run": {
+      "id": "run-contract-v1",
+      "sessionId": "session-contract-v1",
+      "workspaceRoot": "/tmp/JesseAgent",
+      "executionRoot": "/tmp/JesseAgent",
+      "status": "waiting_approval",
+      "createdAt": "2026-08-13T00:00:00.000Z",
+      "updatedAt": "2026-08-13T00:00:01.000Z"
+    },
+    "output": {
+      "type": "approval_request",
+      "request": {
+        "id": "approval-contract-v1",
+        "toolName": "edit_file",
+        "title": "Edit a file",
+        "detail": "Update the selected file"
+      }
+    }
+  }
+}

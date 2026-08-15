@@ -30,7 +30,8 @@ export const runCommandTool: Tool = {
   description:
     '在 shell 中执行一条命令，返回标准输出和标准错误。参数 command 传要执行的命令字符串。 ' +
     '可选参数 cwd 指定执行目录，必须位于项目目录内，默认是项目根目录。 ' +
-    '适合运行构建、测试、git status/git diff 等确实需要 shell 的命令。读取明确文件请优先用 read_file，不要用 cat/head/tail 代替。注意：这会真实地在系统上执行命令。',
+    '适合运行构建、测试、git status/git diff 等会自行结束的命令。不要用它启动 dev server 或 watch 命令（如 npm run dev、vite、next dev、tsx watch）；这类必须用 run_background_command。' +
+    '读取明确文件请优先用 read_file，不要用 cat/head/tail 代替。注意：这会真实地在系统上执行命令。',
 
   parameters: {
     type: 'object',
@@ -57,10 +58,30 @@ export const runCommandTool: Tool = {
       // 把标准输出和标准错误拼在一起返回（模型两个都想看到）。
       let output = stdout
       if (stderr) output += `\n[stderr]\n${stderr}`
+      notifyVerification(context, command, true)
       return output.trim() || `（命令执行成功，无输出；cwd=${cwd.displayPath}）`
     } catch (err) {
       // 命令失败（非零退出码、超时等）也返回文本，让模型看到错误。
+      notifyVerification(context, command, false)
       return `命令执行失败：${String(err)}`
     }
   },
+}
+
+function notifyVerification(context: AgentRuntimeContext | undefined, command: string, ok: boolean): void {
+  const label = verificationLabel(command)
+  if (!label) return
+  try {
+    context?.onVerification?.({ label, ok, finishedAt: new Date().toISOString() })
+  } catch {
+    // Verification history is best-effort and must not affect command execution.
+  }
+}
+
+function verificationLabel(command: string): string | null {
+  const normalized = command.replace(/\s+/g, ' ').trim()
+  if (!/(^|\s)(test|tests|typecheck|check|lint|build|pytest|vitest|jest|xcodebuild)(\s|:|$)|cargo test|gradlew? .*test/i.test(normalized)) {
+    return null
+  }
+  return normalized.length <= 180 ? normalized : `${normalized.slice(0, 179)}…`
 }

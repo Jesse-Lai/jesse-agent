@@ -21,8 +21,8 @@ import { findTool } from './index.js'
 import { confirm } from '../confirm.js'
 import { budgetToolResult } from '../contextBudget.js'
 import { checkPermission, describeRule, rememberSessionAllowRule } from '../permissions.js'
-import { isPathWithinProjectRoot, resolveWorkingDirectory } from '../workingDirectory.js'
-import { classifyBashCommand } from '../bashClassifier.js'
+import { isPathWithinProjectRoot, resolveWorkingDirectory, resolveWritableToolPath } from '../workingDirectory.js'
+import { classifyBashCommand, isLikelyLongRunningCommand } from '../bashClassifier.js'
 import { getPermissionMode, permissionModeTitle } from '../permissionMode.js'
 import { buildToolApprovalRequest, type ToolApprovalRequest } from '../toolApprovals.js'
 
@@ -30,6 +30,7 @@ import { buildToolApprovalRequest, type ToolApprovalRequest } from '../toolAppro
 export interface ExecuteResult {
   ok: boolean
   content: string
+  attachments?: import('../attachments.js').MessageAttachment[]
   /** Stop the current agent run after reporting this result. */
   stop?: boolean
 }
@@ -88,9 +89,9 @@ async function validate(
       )
     }
 
-    if (schemaAllowsString(property.type) && typeof value === 'string' && value.trim() === '') {
-      errors.push(`参数 "${name}" 不能为空字符串`)
-    }
+    // Optional empty strings are harmless placeholders from some models. Tool
+    // implementations can normalize them to undefined; required strings were
+    // already rejected above.
   }
 
   if (errors.length === 0 && isShellCommandTool(tool.name)) {
@@ -98,6 +99,30 @@ async function validate(
       await resolveWorkingDirectory(args.cwd, context)
     } catch (err) {
       errors.push(`参数 "cwd" 不合法：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  if (errors.length === 0 && isFileEditTool(tool.name)) {
+    try {
+      await resolveWritableToolPath(args.path, context)
+    } catch (err) {
+      errors.push(`参数 "path" 不合法：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  if (
+    errors.length === 0 &&
+    tool.name === 'run_command' &&
+    typeof args.command === 'string' &&
+    isLikelyLongRunningCommand(args.command)
+  ) {
+    return {
+      ok: false,
+      content: [
+        '工具 "run_command" 不适合启动长期运行的 dev server 或 watch 命令。',
+        `检测到命令：${args.command}`,
+        '请改用 run_background_command，并在启动后用 task_output 查看输出；如果不需要继续运行，再用 task_stop 停止。',
+      ].join('\n'),
     }
   }
 
@@ -131,11 +156,6 @@ function matchesSchemaType(value: unknown, expected: unknown): boolean {
     default:
       return true
   }
-}
-
-function schemaAllowsString(expected: unknown): boolean {
-  if (expected === 'string') return true
-  return Array.isArray(expected) && expected.includes('string')
 }
 
 function describeExpectedType(expected: unknown): string {
@@ -370,9 +390,14 @@ async function call(
   context?: AgentRuntimeContext,
   prefix?: string,
 ): Promise<ExecuteResult> {
-  const content = await tool.execute(args, context)
+  const output = await tool.execute(args, context)
+  const content = typeof output === 'string' ? output : output.content
   const budgeted = await budgetToolResult(tool.name, content)
-  return { ok: true, content: prefix ? `${prefix}\n\n[Tool output]\n${budgeted}` : budgeted }
+  return {
+    ok: true,
+    content: prefix ? `${prefix}\n\n[Tool output]\n${budgeted}` : budgeted,
+    attachments: typeof output === 'string' ? undefined : output.attachments,
+  }
 }
 
 // ============================================================================

@@ -186,6 +186,11 @@ async function prepareAgentRun(
     cwd: worktreeSession?.worktreePath ?? resolvedParentContext.cwd,
     originalProjectRoot: resolvedParentContext.originalProjectRoot,
     worktreeSession,
+    // Non-isolated sub-agents are part of the same user-visible run. Forward
+    // their concrete writes and checks so the daily summary keeps the real
+    // timestamp instead of attributing everything to the parent finish time.
+    onFileChange: resolvedParentContext.onFileChange,
+    onVerification: resolvedParentContext.onVerification,
   })
 
   const messages: Message[] = [

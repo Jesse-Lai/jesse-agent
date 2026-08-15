@@ -12,7 +12,7 @@
 
 import { realpathSync } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { AgentRuntimeContext } from './runtimeContext.js'
 
 const originalProjectRoot = realpathSync(process.cwd())
@@ -87,6 +87,33 @@ export function resolveToolPath(path: string, context?: AgentRuntimeContext): st
   return isAbsolute(path) ? path : resolve(context?.projectRoot ?? getProjectRoot(), path)
 }
 
+/**
+ * Resolve a file mutation target and reject both lexical `..` escapes and
+ * symlink escapes. Read tools intentionally remain more permissive.
+ */
+export async function resolveWritableToolPath(
+  input: unknown,
+  context?: AgentRuntimeContext,
+): Promise<string> {
+  if (typeof input !== 'string') throw new Error('文件路径必须是字符串')
+  const trimmed = input.trim()
+  if (!trimmed) throw new Error('文件路径不能为空')
+  if (trimmed.includes('\0')) throw new Error('文件路径不能包含 NUL 字符')
+
+  const projectRoot = context?.projectRoot ?? getProjectRoot()
+  const candidate = isAbsolute(trimmed) ? resolve(trimmed) : resolve(projectRoot, trimmed)
+  if (!isInsideRoot(projectRoot, candidate)) {
+    throw new Error(`文件只能写入当前 workspace：${trimmed}`)
+  }
+
+  const realRoot = await realpath(projectRoot)
+  const effectivePath = await resolveThroughExistingAncestor(candidate)
+  if (!isInsideRoot(realRoot, effectivePath)) {
+    throw new Error(`文件路径通过符号链接越出了当前 workspace：${trimmed}`)
+  }
+  return effectivePath
+}
+
 function normalizeCwdInput(input: unknown): string {
   if (input === undefined || input === null) return '.'
   if (typeof input !== 'string') throw new Error('cwd 必须是字符串')
@@ -100,7 +127,25 @@ function normalizeCwdInput(input: unknown): string {
 
 function isInsideProjectRoot(candidate: string, context?: AgentRuntimeContext): boolean {
   const projectRoot = context?.projectRoot ?? getProjectRoot()
-  const rel = relative(projectRoot, candidate)
+  return isInsideRoot(projectRoot, candidate)
+}
+
+async function resolveThroughExistingAncestor(candidate: string): Promise<string> {
+  let cursor = candidate
+  while (true) {
+    try {
+      const realAncestor = await realpath(cursor)
+      return resolve(realAncestor, relative(cursor, candidate))
+    } catch {
+      const parent = dirname(cursor)
+      if (parent === cursor) throw new Error(`无法解析文件路径：${candidate}`)
+      cursor = parent
+    }
+  }
+}
+
+function isInsideRoot(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 

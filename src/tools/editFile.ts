@@ -10,7 +10,8 @@
 import { writeFile } from 'node:fs/promises'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
-import { normalizeToolPath, refreshReadFile, requireFreshRead } from './readState.js'
+import { resolveWritableToolPath } from '../workingDirectory.js'
+import { refreshReadFile, requireFreshRead } from './readState.js'
 
 export const editFileTool: Tool = {
   name: 'edit_file',
@@ -41,7 +42,14 @@ export const editFileTool: Tool = {
     if (!path) return '错误：未提供 path 参数'
     if (oldString === newString) return '编辑被拒绝：old_string 和 new_string 完全相同。'
 
-    const readCheck = await requireFreshRead(path, context)
+    let normalizedPath: string
+    try {
+      normalizedPath = await resolveWritableToolPath(path, context)
+    } catch (error) {
+      return `编辑被拒绝：${error instanceof Error ? error.message : String(error)}`
+    }
+
+    const readCheck = await requireFreshRead(normalizedPath, context)
     if (typeof readCheck === 'string') return `编辑被拒绝：${readCheck}`
 
     const content = readCheck.content
@@ -65,9 +73,17 @@ export const editFileTool: Tool = {
       : content.replace(oldString, newString)
 
     try {
-      const normalizedPath = normalizeToolPath(path, context)
       await writeFile(normalizedPath, updated, 'utf8')
       await refreshReadFile(normalizedPath, updated, context)
+      try {
+        context?.onFileChange?.({
+          path: normalizedPath,
+          action: 'edited',
+          changedAt: new Date().toISOString(),
+        })
+      } catch {
+        // Activity recording is best-effort and must never turn a successful edit into a failure.
+      }
 
       const replaced = replaceAll ? matches : 1
       return [

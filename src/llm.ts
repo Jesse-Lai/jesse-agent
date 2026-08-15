@@ -8,12 +8,19 @@
  *
  * 对应 Claude Code：
  *   相当于 QueryEngine.ts / services/api/ 那一层——真正调用模型 API 的地方。
- *   我们的是极简版：原生 fetch，无 SDK。
+ *   默认路径仍是原生 fetch；copilot_sdk 模式会切到 GitHub Copilot SDK runtime。
  */
 
 // ============================================================================
 // 一、类型定义：先把"消息长什么样""回复长什么样"用类型固定下来
 // ============================================================================
+
+import { sanitizeToolCallHistory } from './messageHistory.js'
+import { getCopilotModel, shutdownCopilotSDK, streamCopilotSDK } from './copilotSdk.js'
+import type { AgentRuntimeContext } from './runtimeContext.js'
+import type { MessageAttachment } from './attachments.js'
+export { generateImage } from './imageGeneration.js'
+export type { GeneratedImage, ImageGenerationInput } from './imageGeneration.js'
 
 /** 一条消息的角色。这是 OpenAI 对话格式的四种角色。 */
 export type Role = 'system' | 'user' | 'assistant' | 'tool'
@@ -38,6 +45,7 @@ export interface ToolCall {
 export interface Message {
   role: Role
   content: string | null
+  attachments?: MessageAttachment[]
   tool_calls?: ToolCall[]
   tool_call_id?: string
 }
@@ -76,6 +84,7 @@ export type LLMResponse =
  */
 export type LLMStreamEvent =
   | { type: 'text_delta'; text: string }
+  | { type: 'attachment'; attachment: MessageAttachment }
   | { type: 'done'; response: LLMResponse }
 
 // ============================================================================
@@ -90,6 +99,18 @@ const API_KEY = process.env.LLM_API_KEY ?? '' // 本地网关不需要，留空�
 const API_MODE = process.env.LLM_API_MODE ?? (BASE_URL.includes('/responses') ? 'responses' : 'chat_completions')
 const API_KEY_HEADER = process.env.LLM_API_KEY_HEADER ?? (BASE_URL.includes('cognitiveservices.azure.com') ? 'api-key' : 'Authorization')
 
+export function getLLMModel(): string {
+  return API_MODE === 'copilot_sdk' ? getCopilotModel() : MODEL
+}
+
+export function getLLMApiMode(): string {
+  return API_MODE
+}
+
+export async function shutdownLLM(): Promise<void> {
+  if (API_MODE === 'copilot_sdk') await shutdownCopilotSDK()
+}
+
 // ============================================================================
 // 三、核心函数：callLLM
 // ============================================================================
@@ -99,12 +120,26 @@ export interface CallOptions {
   tools?: ToolDefinition[]
   /** 可选的中断信号，用于取消请求（Ctrl+C 时会用到）。 */
   signal?: AbortSignal
+  /** 可选模型覆盖，用于标题生成等轻量后台请求。 */
+  model?: string
+  /** 当前 agent 运行上下文；Copilot SDK 权限桥接需要用到。 */
+  context?: AgentRuntimeContext
+  /** Disable all model-managed tools for lightweight transform requests. */
+  allowTools?: boolean
 }
 
 export type LLMStreamer = (
   messages: Message[],
   options?: CallOptions,
 ) => AsyncGenerator<LLMStreamEvent, void, void>
+
+export interface VisualPromptInput {
+  systemPrompt: string
+  prompt: string
+  imageDataURL: string
+  signal?: AbortSignal
+  model?: string
+}
 
 /** 遇到限流(429)或服务端错误(5xx)时，最多重试几次。 */
 const MAX_RETRIES = 3
@@ -126,16 +161,22 @@ export async function* streamLLM(
   messages: Message[],
   options: CallOptions = {},
 ): AsyncGenerator<LLMStreamEvent, void, void> {
+  const requestMessages = sanitizeToolCallHistory(messages)
+  if (API_MODE === 'copilot_sdk') {
+    yield* streamCopilotSDK(requestMessages, options)
+    return
+  }
+
   if (API_MODE === 'responses') {
-    yield* streamResponsesLLM(messages, options)
+    yield* streamResponsesLLM(requestMessages, options)
     return
   }
 
   // 组装请求体。stream:true = 让模型边生成边发（逐字），而不是全写完一次性给。
   // tools 只在传了的时候才加进去。
   const body: Record<string, unknown> = {
-    model: MODEL,
-    messages,
+    model: options.model ?? MODEL,
+    messages: toChatCompletionsMessages(requestMessages),
     stream: true,
   }
   if (options.tools && options.tools.length > 0) {
@@ -262,6 +303,91 @@ export async function* streamLLM(
 }
 
 /**
+ * Sends one image plus one instruction to a Responses-compatible multimodal
+ * endpoint. Quick screenshot tasks use this direct path even when the regular
+ * coding agent is configured to use the Copilot SDK, whose current adapter is
+ * text-only.
+ */
+export async function* streamVisualPrompt(input: VisualPromptInput): AsyncGenerator<string> {
+  const visualBaseURL = process.env.LLM_VISUAL_BASE_URL?.trim() || BASE_URL
+  const visualModel = input.model ?? (process.env.LLM_VISUAL_MODEL?.trim() || MODEL)
+  if (!visualBaseURL.includes('/responses')) {
+    throw new Error('截图任务需要配置 Responses API：请设置 LLM_VISUAL_BASE_URL。')
+  }
+
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  const signal = input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal
+  const response = await fetch(visualBaseURL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify({
+      model: visualModel,
+      instructions: input.systemPrompt,
+      input: [{
+        role: 'user',
+        content: [
+          { type: 'input_text', text: input.prompt },
+          { type: 'input_image', image_url: input.imageDataURL, detail: 'auto' },
+        ],
+      }],
+      stream: true,
+    }),
+    signal,
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`多模态模型请求失败 ${response.status}: ${text}`)
+  }
+  if (!response.body) throw new Error('多模态模型响应没有 body')
+
+  const contentType = response.headers.get('content-type') ?? ''
+  if (!contentType.includes('text/event-stream')) {
+    const json = await response.json() as ResponsesResponse
+    const result = toLLMResponseFromResponses(json)
+    if (result.type === 'text' && result.text.trim()) {
+      yield result.text
+      return
+    }
+    throw new Error('多模态模型没有返回内容，请重试。')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let receivedText = false
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      let event: ResponsesStreamEvent
+      try {
+        event = JSON.parse(payload)
+      } catch {
+        continue
+      }
+      if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+        receivedText = receivedText || event.delta.length > 0
+        yield event.delta
+      } else if (event.type === 'error' || event.type === 'response.failed') {
+        throw new Error(formatResponsesStreamError(event))
+      }
+    }
+  }
+  if (!receivedText) throw new Error('多模态模型没有返回内容，请重试。')
+}
+
+/**
  * Azure/OpenAI Responses API 适配层。
  * 对外仍然吐我们自己的 LLMStreamEvent，这样 loop.ts 不需要跟着改。
  */
@@ -270,7 +396,7 @@ async function* streamResponsesLLM(
   options: CallOptions = {},
 ): AsyncGenerator<LLMStreamEvent, void, void> {
   const body: Record<string, unknown> = {
-    model: MODEL,
+    model: options.model ?? MODEL,
     ...toResponsesInput(messages),
     stream: true,
   }
@@ -420,10 +546,40 @@ function toResponsesInput(messages: Message[]): { instructions?: string; input: 
       continue
     }
 
-    input.push({ role: message.role, content: message.content ?? '' })
+    const images = message.role === 'user'
+      ? (message.attachments ?? []).flatMap(attachment => attachment.dataURL ? [attachment.dataURL] : [])
+      : []
+    if (images.length > 0) {
+      input.push({
+        role: message.role,
+        content: [
+          ...(message.content ? [{ type: 'input_text' as const, text: message.content }] : []),
+          ...images.map(imageURL => ({ type: 'input_image' as const, image_url: imageURL, detail: 'auto' as const })),
+        ],
+      })
+    } else {
+      input.push({ role: message.role, content: message.content ?? '' })
+    }
   }
 
   return instructions ? { instructions, input } : { input }
+}
+
+function toChatCompletionsMessages(messages: Message[]): unknown[] {
+  return messages.map(message => {
+    const images = message.role === 'user'
+      ? (message.attachments ?? []).flatMap(attachment => attachment.dataURL ? [attachment.dataURL] : [])
+      : []
+    if (images.length === 0) return message
+    return {
+      ...message,
+      content: [
+        ...(message.content ? [{ type: 'text', text: message.content }] : []),
+        ...images.map(url => ({ type: 'image_url', image_url: { url, detail: 'auto' } })),
+      ],
+      attachments: undefined,
+    }
+  })
 }
 
 function toLLMResponseFromResponses(response: ResponsesResponse): LLMResponse {
@@ -503,6 +659,13 @@ interface ResponsesToolDefinition {
 
 type ResponsesInputItem =
   | { role: Role; content: string }
+  | {
+      role: Role
+      content: Array<
+        | { type: 'input_text'; text: string }
+        | { type: 'input_image'; image_url: string; detail: 'auto' }
+      >
+    }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string }
 
@@ -519,6 +682,11 @@ type ResponsesOutputItem =
   | {
       type: 'message'
       content?: Array<{ type?: string; text?: string }>
+    }
+  | {
+      type: 'image_generation_call'
+      result?: string
+      revised_prompt?: string
     }
   | {
       type: 'function_call'

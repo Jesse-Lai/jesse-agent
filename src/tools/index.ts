@@ -29,6 +29,8 @@ import { taskContinueTool } from './taskContinue.js'
 import { taskStopTool } from './taskStop.js'
 import { enterWorktreeTool } from './enterWorktree.js'
 import { exitWorktreeTool } from './exitWorktree.js'
+import { microsoftGraphTool } from './microsoftGraph.js'
+import { generateImageTool } from './generateImage.js'
 
 /** 内置工具。加新的内置工具 = 往这里加一个。 */
 const builtInTools: Tool[] = [
@@ -45,6 +47,8 @@ const builtInTools: Tool[] = [
   taskOutputTool,
   taskContinueTool,
   taskStopTool,
+  microsoftGraphTool,
+  generateImageTool,
   enterWorktreeTool,
   exitWorktreeTool,
   runBackgroundCommandTool,

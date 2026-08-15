@@ -1,7 +1,10 @@
 node_modules/
 dist/
 .env
+.jesse/desktop-projects.json
 .jesse/mcp.json
+.jesse/changelog-config.json
+.jesse/changelogs/
 .jesse/plans/
 .jesse/sessions/
 .jesse/task-output/
@@ -11,4 +14,9 @@ dist/
 *.js.map
 *.d.ts
 !src/**
+!desktop-app/**/*.js
 !vscode-extension/extension.js
+macos/JesseCompanion/.build/
+macos/JesseCompanion/.derivedData*/
+macos/JesseCompanion/.swiftpm/
+macos/JesseCompanion/build/

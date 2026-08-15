@@ -52,6 +52,20 @@ export function classifyBashCommand(command: string): BashCommandClassification 
   return needsApproval('不是保守白名单里的只读命令。')
 }
 
+export function isLikelyLongRunningCommand(command: string): boolean {
+  const normalized = normalizeCommand(command).toLowerCase()
+  if (!normalized) return false
+
+  return [
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start)(?:\s|$)/,
+    /\b(?:vite|webpack-dev-server|nodemon)\b/,
+    /\b(?:next|nuxt|astro)\s+dev(?:\s|$)/,
+    /\btsx\s+watch(?:\s|$)/,
+    /\b(?:turbo|nx)\s+[^\n]*\b(?:dev|watch|serve)(?:\s|$)/,
+    /\bconcurrently\b[^\n]*\b(?:dev|watch|serve|start)(?:\s|$)/,
+  ].some(pattern => pattern.test(normalized))
+}
+
 function isPwd(program: string, args: string[]): boolean {
   return program === 'pwd' && args.every(arg => arg === '-L' || arg === '-P')
 }

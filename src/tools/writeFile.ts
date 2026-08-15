@@ -11,7 +11,8 @@ import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { AgentRuntimeContext } from '../runtimeContext.js'
 import type { Tool } from '../types.js'
-import { normalizeToolPath, refreshReadFile, requireFreshRead } from './readState.js'
+import { resolveWritableToolPath } from '../workingDirectory.js'
+import { refreshReadFile, requireFreshRead } from './readState.js'
 
 export const writeFileTool: Tool = {
   name: 'write_file',
@@ -36,12 +37,17 @@ export const writeFileTool: Tool = {
     const content = String(args.content ?? '')
     if (!path) return '错误：未提供 path 参数'
 
-    const normalizedPath = normalizeToolPath(path, context)
+    let normalizedPath: string
+    try {
+      normalizedPath = await resolveWritableToolPath(path, context)
+    } catch (error) {
+      return `写入被拒绝：${error instanceof Error ? error.message : String(error)}`
+    }
     const existing = await existingFileKind(normalizedPath)
     if (existing === 'directory') return `写入失败：${path} 是目录，不是文件。`
 
     if (existing === 'file') {
-      const readCheck = await requireFreshRead(path, context)
+      const readCheck = await requireFreshRead(normalizedPath, context)
       if (typeof readCheck === 'string') return `写入被拒绝：${readCheck}`
     }
 
@@ -49,6 +55,15 @@ export const writeFileTool: Tool = {
       await mkdir(dirname(normalizedPath), { recursive: true })
       await writeFile(normalizedPath, content, 'utf8')
       await refreshReadFile(normalizedPath, content, context)
+      try {
+        context?.onFileChange?.({
+          path: normalizedPath,
+          action: existing === 'file' ? 'updated' : 'created',
+          changedAt: new Date().toISOString(),
+        })
+      } catch {
+        // Activity recording is best-effort and must never turn a successful write into a failure.
+      }
 
       const action = existing === 'file' ? '覆盖' : '创建'
       return [

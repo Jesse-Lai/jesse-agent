@@ -9,7 +9,7 @@ This is Jesse's personal Claude Code-style coding agent project. The goal is to 
 ## Tech Stack
 
 - **Language:** TypeScript + Node.js
-- **LLM:** OpenAI-compatible Chat Completions or Azure/OpenAI Responses API
+- **LLM:** OpenAI-compatible Chat Completions, Azure/OpenAI Responses API, or GitHub Copilot SDK
 - **Architecture:** Custom agentic loop (ReAct pattern)
 - **Framework:** None — built from scratch for learning
 
@@ -23,6 +23,31 @@ See [PLAN.md](./PLAN.md) for the full roadmap and current progress.
 npm install
 npm run dev
 ```
+
+Use GitHub Copilot SDK instead of the OpenAI-compatible gateway:
+
+```bash
+npm install
+cp .env.example .env
+# edit .env:
+#   LLM_API_MODE=copilot_sdk
+#   COPILOT_MODEL=gpt-5.6-sol
+npm run dev
+```
+
+Copilot SDK mode starts the Copilot runtime through `@github/copilot-sdk` and
+maps Copilot permission requests back into Jesse-Agent's existing permission
+modes:
+
+- `default` asks before writes, shell commands, and other non-read operations.
+- `plan` allows reads and read-only shell commands, and rejects mutations.
+- `acceptEdits` automatically allows project-local file edits, while shell
+  commands still follow normal rules.
+- `bypassPermissions` allows SDK operations only when explicitly enabled with
+  `JESSE_ALLOW_BYPASS_PERMISSIONS=1`.
+
+Authentication uses the logged-in Copilot CLI user by default. You can also set
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` in `.env`.
 
 Continue the latest JSONL session transcript:
 
@@ -182,6 +207,101 @@ Background task output uses `src/taskDisplay.ts` to show status, duration, outpu
 The first IDE slice lives in `vscode-extension/`. It contributes a Jesse Agent chat panel plus commands for asking about the current selection or current file. The extension does not drive the terminal REPL; it starts `npm run ide:server`, which runs `src/ideServer.ts` as a long-lived local HTTP server around the existing agent core. `npm run ide` remains available as a one-shot JSONL bridge for scripts and debugging.
 
 Run it locally by opening `vscode-extension/` in VS Code and pressing `F5`. The default permission mode is `default`: read-only tools run directly, while file edits and other non-read-only tools show an approval card in the Jesse Agent panel before execution. The local server listens only on `127.0.0.1`, streams JSONL events back to the extension for each `POST /ask` request, and accepts `POST /approval` to resume a paused tool call.
+
+## Jesse Agent for macOS
+
+Build the native menu-bar companion:
+
+```bash
+npm run companion:package
+```
+
+The packaged app is written to:
+
+```text
+macos/JesseCompanion/build/Jesse Agent.app
+```
+
+`Option-Space` opens a cursor-adjacent command ring in any macOS app. It can
+polish, translate, or summarize selected text; ask a question with the selection
+as context; capture a screen region for direct multimodal analysis; generate a
+document image; show recent results; and show quick-task plus full-Agent status.
+
+The **Do Anything** action starts a real, persistent Agent Session on the first
+message. In Chrome or Safari it reads the active tab URL through macOS
+Accessibility or Apple Events, so no browser extension is required. The Session
+has its own `~/JesseAgent/Scratch/<session-id>` execution directory, keeps
+running when the shortcut panel closes, and streams the same progress, approvals,
+workspace path, and stop state to the shortcut and desktop web UI. File mutations
+outside that workspace are rejected. **Continue in JesseAgent** deep-links to that
+Session, where later messages reuse its history and workspace. A temporary
+workspace can be promoted with **Save as project**; its stable workspace identity
+is retained while the folder moves to `~/JesseAgent/Projects/<project-name>`.
+Set `JESSE_WORKSPACE_HOME` to override the managed `Scratch` and `Projects` root.
+
+Text and image results are written back only when the original application,
+control, range, and selected text still match. Otherwise the result remains in
+Recent Results and is copied to the clipboard when requested. The companion
+never presses Enter or sends a chat message.
+
+The app needs Accessibility permission for selection capture/writeback. macOS may
+also ask for Automation permission when the Apple Events URL fallback first reads
+Chrome or Safari. Screen Recording permission is needed only when the screenshot action is used. Screenshot
+pixels go directly to the configured multimodal model; there is no OCR stage.
+Set `LLM_VISUAL_BASE_URL` to a Responses-compatible endpoint when the primary
+`LLM_BASE_URL` is not already a Responses endpoint. Optional model overrides are
+`LLM_VISUAL_MODEL` and `LLM_IMAGE_MODEL`. For an Azure gpt-image deployment, set
+`LLM_IMAGE_BASE_URL` to its complete `/images/generations` URL; it reuses
+`LLM_API_KEY`. When image generation instead falls back to Azure Responses API,
+`LLM_IMAGE_DEPLOYMENT` must contain the image deployment name from Azure AI
+Foundry.
+
+The desktop web shell can also be started independently:
+
+```bash
+npm run desktop
+```
+
+It builds the React + TypeScript UI, serves it on `127.0.0.1`, and starts the same `src/ideServer.ts` backend used by the VS Code extension.
+
+### Daily project changelogs
+
+Completed project runs record real file and Git changes during the day. At
+`00:05` local time the desktop service turns the previous day's complete work
+into a plain-language changelog and one illustration. If the service was not
+running at midnight, it catches up the next time it starts. Read-only chats,
+failed runs, cancelled runs, and internal `.jesse` transcript writes do not
+create a changelog.
+
+The five most recent daily illustrations appear behind the composer on a
+project's new-chat page. Selecting one opens the full changelog with a
+shared-artwork transition, the files changed that day, verification results,
+and links back to the source sessions. The clicked illustration lands before
+the written detail appears, and closing the detail sends it back to its card.
+
+The default schedule, timezone, and visual style can be replaced without
+changing code. Copy [`changelog-config.example.json`](./changelog-config.example.json)
+to `.jesse/changelog-config.json` in the JesseAgent root for a global setting,
+or into a project's `.jesse/` folder for a project-specific override.
+
+Implementation and system-gated acceptance details are in
+[`macos/JesseCompanion/ACCEPTANCE.md`](./macos/JesseCompanion/ACCEPTANCE.md).
+
+`Jesse Agent.app` is the primary native product. It provides a Dock main window for projects, sessions, persistent Agent runs, approvals, attachments, and outputs while retaining the menu-bar item and global command ring. Press `Option-Space` in any application to open the ring beside the pointer.
+
+Build the signed local app:
+
+```bash
+npm run companion:package
+```
+
+The result is `macos/JesseCompanion/build/Jesse Agent.app`. The package includes its own Node runtime, compiled Agent Service, and web client. A source checkout and system npm are not required at runtime. Development builds may still use `JESSE_AGENT_ROOT` to run against a checkout.
+
+Product metadata and credentials move to `~/Library/Application Support/JesseAgent` on first launch. The migration copies legacy data and never deletes it. If a legacy checkout lives outside the standard personal locations, set `JESSE_LEGACY_AGENT_ROOT` for the first service launch.
+
+On first use, allow Accessibility access so Companion can read an explicit text selection and safely write a result back. Screen Recording is requested only when the screenshot action is used. Companion never presses Enter or sends a Teams/WeChat message; it only replaces or inserts editor content. If the original selection changed, the result is copied instead of being written to the wrong location.
+
+Use the menu bar icon to toggle launch at login, inspect permissions, open the full Agent, or quit Companion.
 
 Useful local commands:
 

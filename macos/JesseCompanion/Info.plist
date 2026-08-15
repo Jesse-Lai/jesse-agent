@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>Jesse Agent</string>
+    <key>CFBundleExecutable</key>
+    <string>JesseCompanion</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jesse.agent.companion</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon.png</string>
+    <key>CFBundleName</key>
+    <string>Jesse Agent</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.jesse.agent.session</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>jesseagent</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>NSAccessibilityUsageDescription</key>
+	<string>读取你主动选择的文字或当前页面内容，并把 Jesse Agent 的结果安全回填到原位置。</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>读取你当前打开的 Chrome 或 Safari 标签页地址，用作 Do Anything 的页面上下文。</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>仅在你选择“截图”时捕获你框选的屏幕区域并交给 Jesse Agent。</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

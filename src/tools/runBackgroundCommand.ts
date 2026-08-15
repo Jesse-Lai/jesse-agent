@@ -12,7 +12,7 @@ export const runBackgroundCommandTool: Tool = {
 
   description:
     '在后台启动一条可能运行较久的 shell 命令，立即返回 task_id，不等待命令完成。' +
-    '适合运行长测试、长构建、watch 之外的长检查或后台调查。' +
+    '适合启动 dev server、watch 命令、长测试、长构建或后台调查。' +
     '参数 command 是要执行的命令；cwd 可选，必须位于项目目录内；description 可选，用于描述任务。' +
     '之后用 task_output 读取输出，用 task_list 查看任务，用 task_stop 停止任务。',
 

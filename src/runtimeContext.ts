@@ -11,6 +11,18 @@ import type { ToolApprovalHandler } from './toolApprovals.js'
 import type { WorktreeSession } from './worktrees.js'
 import { getOriginalProjectRoot, getProjectRoot } from './workingDirectory.js'
 
+export interface RuntimeFileChange {
+  path: string
+  action: 'created' | 'updated' | 'edited'
+  changedAt: string
+}
+
+export interface RuntimeCommandResult {
+  label: string
+  ok: boolean
+  finishedAt: string
+}
+
 export interface AgentRuntimeContext {
   agentId?: string
   /** Stable root for resolving relative tool paths and enforcing cwd bounds. */
@@ -21,6 +33,9 @@ export interface AgentRuntimeContext {
   originalProjectRoot: string
   worktreeSession?: WorktreeSession | null
   approvalHandler?: ToolApprovalHandler
+  /** Optional run-local observers used by durable product activity summaries. */
+  onFileChange?: (change: RuntimeFileChange) => void
+  onVerification?: (result: RuntimeCommandResult) => void
 }
 
 export function createAgentRuntimeContext(input: Partial<AgentRuntimeContext> = {}): AgentRuntimeContext {
@@ -32,5 +47,7 @@ export function createAgentRuntimeContext(input: Partial<AgentRuntimeContext> = 
     originalProjectRoot: input.originalProjectRoot ?? getOriginalProjectRoot(),
     worktreeSession: input.worktreeSession ?? null,
     approvalHandler: input.approvalHandler,
+    onFileChange: input.onFileChange,
+    onVerification: input.onVerification,
   }
 }

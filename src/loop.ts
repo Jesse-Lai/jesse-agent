@@ -18,6 +18,7 @@ import { getAllTools } from './tools/index.js'
 import { executeTool } from './tools/executor.js'
 import { toOpenAITools, type Tool } from './types.js'
 import { createAgentRuntimeContext, type AgentRuntimeContext } from './runtimeContext.js'
+import type { MessageAttachment } from './attachments.js'
 
 export interface RunAgentOptions {
   tools?: Tool[]
@@ -36,6 +37,7 @@ export type AgentEvent =
   | { type: 'turn_start'; turn: number }                  // 新一轮开始（第几次问模型）
   | { type: 'assistant_delta'; text: string }             // 模型文本的一小段（流式逐字）
   | { type: 'assistant_text'; text: string }              // 模型文本回复的完整版（本轮结束）
+  | { type: 'assistant_attachment'; attachment: MessageAttachment }
   | { type: 'tool_start'; name: string; args: unknown }   // 开始执行某个工具
   | { type: 'tool_result'; name: string; ok: boolean; content: string } // 工具结果
   | { type: 'error'; reason: string }                     // 不可恢复错误（如 LLM 重试耗尽），优雅收尾
@@ -58,12 +60,14 @@ export async function* runAgent(
   const maxTurns = options.maxTurns
   const llmStream = options.llmStream ?? streamLLM
   const runtimeContext = options.context ?? createAgentRuntimeContext()
+  const pendingAttachments: MessageAttachment[] = []
   // 把我们的工具转成 OpenAI 格式，随每次请求发给模型，让它知道有哪些工具可用。
   const tools = toOpenAITools(availableTools)
 
   // 轮次计数：每问一次模型算一轮。maxTurns 只有调用方明确传入时才启用。
   for (let turn = 0; maxTurns === undefined || turn < maxTurns; turn++) {
     if (options.signal?.aborted) {
+      persistPendingAttachments(messages, pendingAttachments)
       yield { type: 'error', reason: 'Agent run was cancelled.' }
       return
     }
@@ -82,14 +86,19 @@ export async function* runAgent(
     // 捕获转成 error 事件优雅收尾（维持"loop 只通过事件对外沟通"的承重原则）。
     let response: LLMResponse | undefined
     try {
-      for await (const ev of llmStream(messages, { tools, signal: options.signal })) {
+      for await (const ev of llmStream(messages, { tools, signal: options.signal, context: runtimeContext })) {
         if (ev.type === 'text_delta') {
           yield { type: 'assistant_delta', text: ev.text }
+        } else if (ev.type === 'attachment') {
+          if (rememberAttachment(pendingAttachments, ev.attachment)) {
+            yield { type: 'assistant_attachment', attachment: ev.attachment }
+          }
         } else {
           response = ev.response // done：拿到拼好的完整回复
         }
       }
     } catch (err) {
+      persistPendingAttachments(messages, pendingAttachments)
       yield {
         type: 'error',
         reason: err instanceof Error ? err.message : String(err),
@@ -98,6 +107,7 @@ export async function* runAgent(
     }
     // 正常情况下 streamLLM 一定会给一个 done；万一没有，防御一下。
     if (!response) {
+      persistPendingAttachments(messages, pendingAttachments)
       yield { type: 'error', reason: '模型没有返回任何内容' }
       return
     }
@@ -105,6 +115,7 @@ export async function* runAgent(
     // ---- 2. 模型给的是纯文本 → 本轮对话结束 ----
     if (response.type === 'text') {
       // 把模型的回复存进历史，下一轮它记得自己说过啥。
+      if (pendingAttachments.length > 0) response.raw.attachments = [...pendingAttachments]
       messages.push(response.raw)
       // 吐出"文本回复"事件，然后返回（结束生成器）。
       yield { type: 'assistant_text', text: response.text }
@@ -148,6 +159,12 @@ export async function* runAgent(
         content: result.content,
       }
 
+      for (const attachment of result.attachments ?? []) {
+        if (rememberAttachment(pendingAttachments, attachment)) {
+          yield { type: 'assistant_attachment', attachment }
+        }
+      }
+
       // 把工具结果作为一条 role:'tool' 的消息塞回历史。
       // tool_call_id 必须对应上面那次 tool_call 的 id，模型才知道这是哪次调用的结果。
       messages.push({
@@ -156,7 +173,10 @@ export async function* runAgent(
         tool_call_id: toolCall.id,
       })
 
-      if (result.stop) return
+      if (result.stop) {
+        persistPendingAttachments(messages, pendingAttachments)
+        return
+      }
     }
 
     await options.refreshSystemPrompt?.(messages)
@@ -166,5 +186,19 @@ export async function* runAgent(
   }
 
   // 循环跑满调用方显式设置的 maxTurns 还没结束 → 强制收尾。
+  persistPendingAttachments(messages, pendingAttachments)
   yield { type: 'max_turns' } // ← 出口2：强制结束
+}
+
+function rememberAttachment(target: MessageAttachment[], attachment: MessageAttachment): boolean {
+  const key = attachment.assetId || attachment.dataURL
+  if (key && target.some(candidate => (candidate.assetId || candidate.dataURL) === key)) return false
+  target.push(attachment)
+  return true
+}
+
+function persistPendingAttachments(messages: Message[], attachments: MessageAttachment[]): void {
+  if (attachments.length === 0) return
+  messages.push({ role: 'assistant', content: null, attachments: [...attachments] })
+  attachments.splice(0, attachments.length)
 }
