@@ -154,6 +154,15 @@ struct DesktopOutputItem: Identifiable, Equatable {
     let title: String
     let detail: String
     let succeeded: Bool?
+    let runID: String?
+
+    init(kind: Kind, title: String, detail: String, succeeded: Bool?, runID: String? = nil) {
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.succeeded = succeeded
+        self.runID = runID
+    }
 
     enum Kind: Equatable {
         case file

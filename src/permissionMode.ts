@@ -22,13 +22,20 @@ export function getPermissionMode(): PermissionMode {
   return currentMode
 }
 
-export function setPermissionMode(mode: PermissionMode): { ok: true; mode: PermissionMode } | { ok: false; reason: string } {
+export function validatePermissionMode(mode: PermissionMode): { ok: true; mode: PermissionMode } | { ok: false; reason: string } {
   if (mode === 'bypassPermissions' && process.env[BYPASS_ENV] !== '1') {
     return {
       ok: false,
       reason: `bypassPermissions 是危险模式；如确实需要，请先设置 ${BYPASS_ENV}=1 后重启 agent。`,
     }
   }
+
+  return { ok: true, mode }
+}
+
+export function setPermissionMode(mode: PermissionMode): { ok: true; mode: PermissionMode } | { ok: false; reason: string } {
+  const validation = validatePermissionMode(mode)
+  if (!validation.ok) return validation
 
   currentMode = mode
   return { ok: true, mode }

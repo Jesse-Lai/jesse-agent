@@ -9,6 +9,7 @@
 
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, relative, sep } from 'node:path'
+import type { AgentRuntimeContext } from './runtimeContext.js'
 import { getProjectRoot } from './workingDirectory.js'
 
 export const PROJECT_MEMORY_DIR = '.jesse/memory'
@@ -41,12 +42,13 @@ export interface ProjectMemoryContext {
   error?: string
 }
 
-export async function loadProjectMemoryContext(): Promise<ProjectMemoryContext> {
+export async function loadProjectMemoryContext(context?: AgentRuntimeContext): Promise<ProjectMemoryContext> {
+  const root = context?.projectRoot ?? getProjectRoot()
   try {
-    await ensureProjectMemoryStore()
+    await ensureProjectMemoryStore(context)
     const [indexContent, memories] = await Promise.all([
-      readMemoryIndex(),
-      scanMemoryHeaders(),
+      readMemoryIndex(root),
+      scanMemoryHeaders(root),
     ])
 
     return {
@@ -68,8 +70,8 @@ export async function loadProjectMemoryContext(): Promise<ProjectMemoryContext> 
   }
 }
 
-export async function ensureProjectMemoryStore(): Promise<void> {
-  const root = getProjectRoot()
+export async function ensureProjectMemoryStore(context?: AgentRuntimeContext): Promise<void> {
+  const root = context?.projectRoot ?? getProjectRoot()
   const dir = join(root, PROJECT_MEMORY_DIR)
   const index = join(root, PROJECT_MEMORY_INDEX)
 
@@ -85,14 +87,13 @@ export async function ensureProjectMemoryStore(): Promise<void> {
   await writeFile(index, defaultMemoryIndex(), 'utf8')
 }
 
-async function readMemoryIndex(): Promise<string> {
-  const raw = await readFile(join(getProjectRoot(), PROJECT_MEMORY_INDEX), 'utf8')
+async function readMemoryIndex(root: string): Promise<string> {
+  const raw = await readFile(join(root, PROJECT_MEMORY_INDEX), 'utf8')
   if (raw.length <= MAX_INDEX_CHARS) return raw.trim()
   return `${raw.slice(0, MAX_INDEX_CHARS).trim()}\n\n> WARNING: MEMORY.md was truncated for prompt context. Keep it as a short index.`
 }
 
-async function scanMemoryHeaders(): Promise<MemoryHeader[]> {
-  const root = getProjectRoot()
+async function scanMemoryHeaders(root: string): Promise<MemoryHeader[]> {
   const memoryRoot = join(root, PROJECT_MEMORY_DIR)
   const files = await walkMarkdownFiles(memoryRoot)
 

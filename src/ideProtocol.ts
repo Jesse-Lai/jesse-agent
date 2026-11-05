@@ -18,6 +18,7 @@ import { getPlanModeContext } from './planMode.js'
 import { parsePermissionMode, type PermissionMode } from './permissionMode.js'
 import type { SessionWorkspaceMetadata } from './workspaces.js'
 import { normalizeMessageAttachments, type MessageAttachment } from './attachments.js'
+import type { AgentRuntimeContext } from './runtimeContext.js'
 
 export interface IdeBridgeRequest {
   prompt?: string
@@ -66,7 +67,7 @@ export interface IdeAutoCompactSummary {
 }
 
 export type IdeBridgeOutput =
-  | { type: 'ready'; workspaceRoot?: string; cwd?: string; workspace?: SessionWorkspaceMetadata; sessionId?: string; messageCount?: number; permissionMode: PermissionMode; autoCompact?: IdeAutoCompactSummary }
+  | { type: 'ready'; workspaceRoot?: string; cwd?: string; workspace?: SessionWorkspaceMetadata; sessionId?: string; runId?: string; messageCount?: number; permissionMode: PermissionMode; autoCompact?: IdeAutoCompactSummary }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'approval_request'; request: IdeApprovalRequest }
   | { type: 'approval_response'; id: string; choice: ConfirmChoice }
@@ -100,12 +101,19 @@ export async function buildIdeMessages(
   return messages
 }
 
-export async function buildFreshSystemPrompt(mcpRuntime: McpRuntimeContext | null): Promise<string> {
+export async function buildFreshSystemPrompt(
+  mcpRuntime: McpRuntimeContext | null,
+  context?: AgentRuntimeContext,
+): Promise<string> {
   const [memory, skills] = await Promise.all([
-    loadProjectMemoryContext(),
-    loadSkillsContext(),
+    loadProjectMemoryContext(context),
+    loadSkillsContext(context),
   ])
-  return buildSystemPrompt(memory, skills, mcpRuntime?.prompt ?? null, getPlanModeContext())
+  return buildSystemPrompt(memory, skills, mcpRuntime?.prompt ?? null, getPlanModeContext(), {
+    permissionMode: context?.permissionMode,
+    projectRoot: context?.projectRoot,
+    worktreeSession: context?.worktreeSession,
+  })
 }
 
 export function normalizeMaxTurns(value: unknown): number | undefined {

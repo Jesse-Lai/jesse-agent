@@ -570,9 +570,11 @@ private struct AskCompanionView: View {
                             ForEach(session.messages) { message in
                                 agentMessage(message)
                             }
-                            agentActivity(session)
-                            if let approval = session.pendingApproval {
-                                approvalCard(approval)
+                            ForEach(session.runs) { run in
+                                agentActivity(run)
+                                if let approval = run.pendingApproval, let runID = run.runID {
+                                    approvalCard(approval, runID: runID)
+                                }
                             }
                         }
                     }
@@ -601,7 +603,6 @@ private struct AskCompanionView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .focused($focusedField, equals: .askEditor)
-                    .disabled(isRunning)
                     .onKeyPress(.return, phases: .down) { press in
                         guard !press.modifiers.contains(.shift) else { return .ignored }
                         submit()
@@ -610,28 +611,15 @@ private struct AskCompanionView: View {
 
                 HStack {
                     Spacer()
-                    if isRunning {
-                        Button {
-                            model.send(.cancelAgentRun)
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 11, weight: .semibold))
-                                .frame(width: 16, height: 18)
-                        }
-                        .buttonStyle(WebComposerSendButtonStyle())
-                        .accessibilityLabel(model.language.text("停止", "Stop"))
-                        .help(model.language.text("停止", "Stop"))
-                    } else {
-                        Button(action: submit) {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(width: 16, height: 18)
-                        }
-                        .buttonStyle(WebComposerSendButtonStyle())
-                        .disabled(!canSubmit)
-                        .accessibilityLabel(model.language.text("发送", "Send"))
-                        .help(model.language.text("发送", "Send"))
+                    Button(action: submit) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 16, height: 18)
                     }
+                    .buttonStyle(WebComposerSendButtonStyle())
+                    .disabled(!canSubmit)
+                    .accessibilityLabel(model.language.text("发送", "Send"))
+                    .help(model.language.text("发送", "Send"))
                 }
                 .frame(height: 55)
                 .padding(.horizontal, 12)
@@ -748,23 +736,35 @@ private struct AskCompanionView: View {
         }
     }
 
-    private func agentActivity(_ session: CompanionAgentSession) -> some View {
+    private func agentActivity(_ run: CompanionAgentRunState) -> some View {
         HStack(spacing: 8) {
-            if session.status.isActive {
+            if run.status.isActive {
                 ProgressView().controlSize(.small)
             } else {
-                Image(systemName: session.status == .completed ? "checkmark.circle.fill" : "exclamationmark.circle")
-                    .foregroundStyle(session.status == .completed ? Color(nsColor: .systemGreen) : Color.secondary)
+                Image(systemName: run.status == .completed ? "checkmark.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle(run.status == .completed ? Color(nsColor: .systemGreen) : Color.secondary)
             }
-            Text(session.activity)
+            Text(run.activity)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+            Spacer(minLength: 6)
+            if run.isActive, let runID = run.runID {
+                Button {
+                    model.send(.cancelAgentRun(runID: runID))
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(model.language.text("停止此任务", "Stop this task"))
+                .help(model.language.text("停止此任务", "Stop this task"))
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func approvalCard(_ approval: AgentApprovalRequest) -> some View {
+    private func approvalCard(_ approval: AgentApprovalRequest, runID: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(approval.title)
                 .font(.system(size: 12, weight: .semibold))
@@ -774,10 +774,10 @@ private struct AskCompanionView: View {
                 .lineLimit(3)
             HStack {
                 Button(model.language.text("拒绝", "Reject")) {
-                    model.send(.approveAgentRun(id: approval.id, choice: "reject_once"))
+                    model.send(.approveAgentRun(runID: runID, id: approval.id, choice: "reject_once"))
                 }
                 Button(model.language.text("允许一次", "Allow Once")) {
-                    model.send(.approveAgentRun(id: approval.id, choice: "allow_once"))
+                    model.send(.approveAgentRun(runID: runID, id: approval.id, choice: "allow_once"))
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -786,10 +786,6 @@ private struct AskCompanionView: View {
         .padding(10)
         .background(Color.orange.opacity(0.09))
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-    }
-
-    private var isRunning: Bool {
-        model.agentSession?.status.isActive == true
     }
 
     private var canSubmit: Bool {

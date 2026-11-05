@@ -5,8 +5,8 @@ import { getProjectRoot } from './workingDirectory.js'
 const execFileAsync = promisify(execFile)
 const DIFF_MAX_CHARS = 24_000
 
-export async function formatGitDiff(): Promise<string> {
-  const cwd = getProjectRoot()
+export async function formatGitDiff(projectRoot = getProjectRoot()): Promise<string> {
+  const cwd = projectRoot
 
   const status = await git(['status', '--short'], cwd)
   if (!status.ok) return `读取 git status 失败：${status.output}`

@@ -8,16 +8,18 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { stderr, stdout } from 'node:process'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type { ConfirmChoice } from './confirm.js'
 import { getLLMApiMode, getLLMModel, shutdownLLM, type Message } from './llm.js'
 import { runAgent } from './loop.js'
 import { loadMcpRuntimeContext, type McpRuntimeContext } from './mcp.js'
 import { setExternalTools } from './tools/index.js'
-import { getProjectRoot, setProjectRoot } from './workingDirectory.js'
-import { setPermissionMode } from './permissionMode.js'
+import { validatePermissionMode, type PermissionMode } from './permissionMode.js'
+import type { PermissionRule } from './permissions.js'
 import { createAgentRuntimeContext } from './runtimeContext.js'
 import { compactMessages } from './compaction.js'
 import { CONTEXT_WARN_CHARS, estimateContextChars } from './contextBudget.js'
@@ -62,7 +64,7 @@ import {
   type IdeBridgeRequest,
 } from './ideProtocol.js'
 import type { RuntimeCommandResult, RuntimeFileChange } from './runtimeContext.js'
-import { validateApprovalRun, validateCancelRun } from './runScope.js'
+import { validateApprovalRun } from './runScope.js'
 
 console.log = (...args: unknown[]) => {
   stderr.write(`${args.map(String).join(' ')}\n`)
@@ -91,6 +93,8 @@ interface IdeSessionState {
   metadata: SessionMetadata
   lastRun: SessionRunState | null
   resumed: boolean
+  permissionRules: PermissionRule[]
+  operationTail: Promise<void>
 }
 
 interface BackgroundRunSnapshot {
@@ -109,7 +113,27 @@ interface BackgroundRunSnapshot {
 
 interface BackgroundRun extends BackgroundRunSnapshot {
   session: IdeSessionState
+  messages: Message[]
+  baseMessageCount: number
+  permissionMode: PermissionMode
   abortController: AbortController
+}
+
+interface ForegroundRun {
+  id: string
+  sessionId: string
+  workspaceRoot: string
+  abortController: AbortController
+}
+
+interface PreparedIdeRun {
+  workspaceRoot: string
+  session: IdeSessionState
+  messages: Message[]
+  baseMessageCount: number
+  permissionMode: PermissionMode
+  autoCompact: Awaited<ReturnType<typeof autoCompactSessionIfNeeded>>
+  titlePromise: Promise<void>
 }
 
 interface RunChangelogTracker {
@@ -138,15 +162,22 @@ interface RunSubscriber {
 }
 
 let mcpRuntime: McpRuntimeContext | null = null
-let busy = false
 let approvalCounter = 0
-let activeSession: IdeSessionState | null = null
-let currentAbortController: AbortController | null = null
 const pendingApprovals = new Map<string, PendingApproval>()
 const backgroundRuns = new Map<string, BackgroundRun>()
+const foregroundRuns = new Map<string, ForegroundRun>()
+const ideSessions = new Map<string, IdeSessionState>()
+const ideSessionLoads = new Map<string, Promise<IdeSessionState>>()
+const lastSessionByWorkspace = new Map<string, string>()
 const backgroundRunEvents: BackgroundRunEnvelope[] = []
 const runSubscribers = new Set<RunSubscriber>()
 let backgroundRunCursor = 0
+
+export interface IdeServerHandle {
+  host: string
+  port: number
+  close: () => Promise<void>
+}
 
 async function main(): Promise<void> {
   if (process.argv.includes('--help')) {
@@ -161,6 +192,16 @@ async function main(): Promise<void> {
     return
   }
 
+  await startIdeServer()
+}
+
+export async function startIdeServer(options: {
+  announce?: boolean
+  registerSignalHandlers?: boolean
+} = {}): Promise<IdeServerHandle> {
+  const announce = options.announce !== false
+  const registerSignalHandlers = options.registerSignalHandlers !== false
+
   mcpRuntime = await loadMcpRuntimeContext()
   setExternalTools(mcpRuntime.tools)
 
@@ -172,27 +213,40 @@ async function main(): Promise<void> {
   })
 
   const port = normalizePort(process.env.JESSE_IDE_PORT)
-  server.listen(port, DEFAULT_HOST, () => {
-    const address = server.address()
-    const actualPort = typeof address === 'object' && address ? address.port : port
-    writeStartupJson({ type: 'server_ready', host: DEFAULT_HOST, port: actualPort })
+  await new Promise<void>((resolveListen, rejectListen) => {
+    const onError = (error: Error) => rejectListen(error)
+    server.once('error', onError)
+    server.listen(port, DEFAULT_HOST, () => {
+      server.off('error', onError)
+      resolveListen()
+    })
   })
+  const address = server.address()
+  const actualPort = typeof address === 'object' && address ? address.port : port
+  if (announce) writeStartupJson({ type: 'server_ready', host: DEFAULT_HOST, port: actualPort })
 
+  let closed = false
   const close = async () => {
-    currentAbortController?.abort()
-    currentAbortController = null
-    server.close()
+    if (closed) return
+    closed = true
+    for (const run of backgroundRuns.values()) run.abortController.abort()
+    for (const run of foregroundRuns.values()) run.abortController.abort()
     rejectPendingApprovals()
     for (const subscriber of runSubscribers) {
       clearInterval(subscriber.keepAlive)
       subscriber.response.end()
     }
     runSubscribers.clear()
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()))
     await mcpRuntime?.close()
+    mcpRuntime = null
     await shutdownLLM()
   }
-  process.once('SIGINT', () => { void close().finally(() => process.exit(0)) })
-  process.once('SIGTERM', () => { void close().finally(() => process.exit(0)) })
+  if (registerSignalHandlers) {
+    process.once('SIGINT', () => { void close().finally(() => process.exit(0)) })
+    process.once('SIGTERM', () => { void close().finally(() => process.exit(0)) })
+  }
+  return { host: DEFAULT_HOST, port: actualPort, close }
 }
 
 async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -200,11 +254,14 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<
     if (req.method === 'GET' && req.url === '/health') {
       writeJson(res, 200, {
         ok: true,
-        busy,
+        busy: activeRunCount() > 0,
+        activeRuns: activeRunCount(),
         pendingApprovals: pendingApprovals.size,
-        sessionId: activeSession?.transcript.id,
-        messageCount: activeSession?.messages.length ?? 0,
-        cwd: getProjectRoot(),
+        sessionIds: [...new Set([
+          ...activeBackgroundRuns().map(run => run.sessionId),
+          ...[...foregroundRuns.values()].map(run => run.sessionId),
+        ])],
+        cwd: AGENT_ROOT,
         agentRoot: AGENT_ROOT,
       })
       return
@@ -222,7 +279,7 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<
         res,
         assetMatch[1],
         assetMatch[2],
-        normalizeWorkspaceRoot(assetRequestURL.searchParams.get('workspaceRoot') ?? undefined) ?? getProjectRoot(),
+        normalizeWorkspaceRoot(assetRequestURL.searchParams.get('workspaceRoot') ?? undefined) ?? AGENT_ROOT,
       )
       return
     }
@@ -262,28 +319,8 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<
       return
     }
 
-    if (busy) {
-      const activeRun = [...backgroundRuns.values()]
-        .filter(run => isActiveBackgroundRunStatus(run.status))
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
-      writeJson(res, 409, {
-        error: activeRun
-          ? 'Another Do Anything Session is still running. Open JesseAgent to view or stop it, then retry this prompt.'
-          : 'Jesse Agent is busy. Wait for the current request to finish or cancel it, then retry this prompt.',
-        code: 'agent_busy',
-        ...(activeRun ? { run: backgroundRunSnapshot(activeRun) } : {}),
-      })
-      return
-    }
-
     if (req.method === 'POST' && req.url === '/runs') {
-      busy = true
-      try {
-        await handleStartBackgroundRun(req, res)
-      } catch (error) {
-        busy = false
-        throw error
-      }
+      await handleStartBackgroundRun(req, res)
       return
     }
 
@@ -322,13 +359,8 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<
       return
     }
 
-    busy = true
-    try {
-      const request = parseIdeRequest(JSON.parse(await readBody(req)))
-      await runAsk(request, res)
-    } finally {
-      busy = false
-    }
+    const request = parseIdeRequest(JSON.parse(await readBody(req)))
+    await runAsk(request, res)
   } catch (err) {
     if (!res.headersSent) {
       writeJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
@@ -340,31 +372,12 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse): Promise<
 }
 
 async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<void> {
-  const workspaceRoot = await activateWorkspace(request.context?.workspaceRoot)
-
-  const permissionMode = request.permissionMode ?? 'default'
-  const modeResult = setPermissionMode(permissionMode)
-  if (!modeResult.ok) throw new Error(modeResult.reason)
-
-  const session = await ensureIdeSession(workspaceRoot, request.sessionId)
-  await configureSessionWorkspace(session, request)
-  await setProjectRoot(session.executionRoot)
-  await refreshSessionSystemPrompt(session.messages)
-
+  const prepared = await prepareIdeRun(request)
+  const { workspaceRoot, session, messages, baseMessageCount, permissionMode, autoCompact, titlePromise } = prepared
   const prompt = request.prompt?.trim() ?? ''
-  if (!prompt && !request.attachments?.length) throw new Error('prompt or attachments is required')
-
-  const shouldGenerateTitle = !session.title && !session.messages.some(message => message.role === 'user')
-  session.messages.push({
-    role: 'user',
-    content: formatIdePrompt(prompt, request.context),
-    attachments: request.attachments?.length ? request.attachments : undefined,
-  })
-  session.persistedMessageCount = await recordNewMessages(session.transcript, session.messages, session.persistedMessageCount)
-  const titlePromise = shouldGenerateTitle
-    ? generateAndPersistSessionTitle(session, prompt || 'Image request')
-    : Promise.resolve()
-  const autoCompact = await autoCompactSessionIfNeeded(session)
+  const runId = randomUUID()
+  const abortController = new AbortController()
+  foregroundRuns.set(runId, { id: runId, sessionId: session.transcript.id, workspaceRoot, abortController })
 
   res.writeHead(200, {
     'content-type': 'application/x-ndjson; charset=utf-8',
@@ -374,45 +387,49 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
   writeJsonl(res, {
     type: 'ready',
     workspaceRoot,
-    cwd: getProjectRoot(),
+    cwd: session.executionRoot,
     workspace: session.metadata.workspace,
     sessionId: session.transcript.id,
-    messageCount: session.messages.length,
+    runId,
+    messageCount: messages.length,
     permissionMode,
     autoCompact,
   })
 
   const projectRoot = session.executionRoot
   const changelog = await startChangelogTracking({
-    runId: randomUUID(),
+    runId,
     projectRoot,
     sessionId: session.transcript.id,
     startedAt: new Date().toISOString(),
     userRequest: prompt,
   })
   const context = createAgentRuntimeContext({
+    sessionId: session.transcript.id,
     projectRoot,
     cwd: projectRoot,
     originalProjectRoot: projectRoot,
-    approvalHandler: createIdeApprovalHandler(res),
+    permissionMode,
+    permissionRules: session.permissionRules,
+    signal: abortController.signal,
+    approvalHandler: createIdeApprovalHandler(res, runId),
+    onWorktreeEvent: event => withSessionLock(session, () => session.transcript.appendWorktreeEvent(event)),
     onFileChange: change => changelog.fileChanges.push(change),
     onVerification: result => changelog.verifications.push(result),
   })
 
-  const abortController = new AbortController()
-  currentAbortController = abortController
   let cancelled = false
   let failed = false
   let finishedWithAnswer = false
 
   try {
-    for await (const event of runAgent(session.messages, {
+    for await (const event of runAgent(messages, {
       context,
       maxTurns: normalizeMaxTurns(request.maxTurns),
       signal: abortController.signal,
       refreshSystemPrompt: async currentMessages => {
         const first = currentMessages[0]
-        if (first?.role === 'system') first.content = await buildFreshSystemPrompt(mcpRuntime)
+        if (first?.role === 'system') first.content = await buildFreshSystemPrompt(mcpRuntime, context)
       },
     })) {
       const outputEvent = event.type === 'error' && abortController.signal.aborted
@@ -424,16 +441,17 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
         changelog.assistantResult = outputEvent.text
         finishedWithAnswer = true
       }
-      await session.transcript.appendEvent(outputEvent)
-      session.persistedMessageCount = await recordNewMessages(session.transcript, session.messages, session.persistedMessageCount)
+      await appendSessionEvent(session, outputEvent)
       writeJsonl(res, { type: 'agent_event', event: outputEvent })
     }
   } finally {
     cancelled = cancelled || abortController.signal.aborted
-    if (currentAbortController === abortController) currentAbortController = null
+    foregroundRuns.delete(runId)
     try {
-      session.persistedMessageCount = await recordNewMessages(session.transcript, session.messages, session.persistedMessageCount)
-      await titlePromise
+      await commitRunMessages(session, messages, baseMessageCount)
+      await titlePromise.catch(error => {
+        stderr.write(`session title generation failed: ${error instanceof Error ? error.message : String(error)}\n`)
+      })
     } finally {
       await finishChangelogTracking(changelog, !cancelled && !failed && finishedWithAnswer)
     }
@@ -445,34 +463,8 @@ async function runAsk(request: IdeBridgeRequest, res: ServerResponse): Promise<v
 
 async function handleStartBackgroundRun(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const request = parseIdeRequest(JSON.parse(await readBody(req)))
-  const prompt = request.prompt?.trim() ?? ''
-  if (!prompt && !request.attachments?.length) throw new Error('prompt or attachments is required')
-
-  const workspaceRoot = await activateWorkspace(request.context?.workspaceRoot)
-  const permissionMode = request.permissionMode ?? 'default'
-  const modeResult = setPermissionMode(permissionMode)
-  if (!modeResult.ok) throw new Error(modeResult.reason)
-
-  const session = await ensureIdeSession(workspaceRoot, request.sessionId)
-  await configureSessionWorkspace(session, request)
-  await setProjectRoot(session.executionRoot)
-  await refreshSessionSystemPrompt(session.messages)
-
-  const shouldGenerateTitle = !session.title && !session.messages.some(message => message.role === 'user')
-  session.messages.push({
-    role: 'user',
-    content: formatIdePrompt(prompt, request.context),
-    attachments: request.attachments?.length ? request.attachments : undefined,
-  })
-  session.persistedMessageCount = await recordNewMessages(
-    session.transcript,
-    session.messages,
-    session.persistedMessageCount,
-  )
-  const titlePromise = shouldGenerateTitle
-    ? generateAndPersistSessionTitle(session, prompt || 'Image request')
-    : Promise.resolve()
-  const autoCompact = await autoCompactSessionIfNeeded(session)
+  const prepared = await prepareIdeRun(request)
+  const { workspaceRoot, session, messages, baseMessageCount, permissionMode, autoCompact, titlePromise } = prepared
 
   const now = new Date().toISOString()
   const run: BackgroundRun = {
@@ -486,6 +478,9 @@ async function handleStartBackgroundRun(req: IncomingMessage, res: ServerRespons
     createdAt: now,
     updatedAt: now,
     session,
+    messages,
+    baseMessageCount,
+    permissionMode,
     abortController: new AbortController(),
   }
   backgroundRuns.set(run.id, run)
@@ -503,9 +498,63 @@ async function handleStartBackgroundRun(req: IncomingMessage, res: ServerRespons
   queueMicrotask(() => {
     void executeBackgroundRun(run, request, autoCompact, titlePromise).catch(error => {
       stderr.write(`background run failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
-      busy = false
     })
   })
+}
+
+async function prepareIdeRun(request: IdeBridgeRequest): Promise<PreparedIdeRun> {
+  const prompt = request.prompt?.trim() ?? ''
+  if (!prompt && !request.attachments?.length) throw new Error('prompt or attachments is required')
+
+  const workspaceRoot = await activateWorkspace(request.context?.workspaceRoot)
+  const permissionMode = request.permissionMode ?? 'default'
+  const modeResult = validatePermissionMode(permissionMode)
+  if (!modeResult.ok) throw new Error(modeResult.reason)
+
+  const session = await ensureIdeSession(workspaceRoot, request.sessionId)
+  const preparation = await withSessionLock(session, async () => {
+    await configureSessionWorkspace(session, request)
+    const promptContext = createAgentRuntimeContext({
+      sessionId: session.transcript.id,
+      projectRoot: session.executionRoot,
+      cwd: session.executionRoot,
+      originalProjectRoot: session.executionRoot,
+      permissionMode,
+      permissionRules: session.permissionRules,
+    })
+    await refreshSessionSystemPrompt(session.messages, promptContext)
+
+    const shouldGenerateTitle = !session.title && !session.messages.some(message => message.role === 'user')
+    const userMessage: Message = {
+      role: 'user',
+      content: formatIdePrompt(prompt, request.context),
+      attachments: request.attachments?.length ? request.attachments : undefined,
+    }
+    session.messages.push(userMessage)
+    await session.transcript.appendMessage(session.messages.length - 1, userMessage)
+    session.persistedMessageCount = session.messages.length
+    const autoCompact = await autoCompactSessionIfNeeded(session, promptContext)
+    const messages = cloneMessages(session.messages)
+    return {
+      messages,
+      baseMessageCount: messages.length,
+      shouldGenerateTitle,
+      autoCompact,
+    }
+  })
+
+  const titlePromise = preparation.shouldGenerateTitle
+    ? generateAndPersistSessionTitle(session, prompt || 'Image request')
+    : Promise.resolve()
+  return {
+    workspaceRoot,
+    session,
+    messages: preparation.messages,
+    baseMessageCount: preparation.baseMessageCount,
+    permissionMode,
+    autoCompact: preparation.autoCompact,
+    titlePromise,
+  }
 }
 
 async function configureSessionWorkspace(session: IdeSessionState, request: IdeBridgeRequest): Promise<void> {
@@ -539,7 +588,6 @@ async function executeBackgroundRun(
   // permissionMode is already validated before the detached run starts. Keep
   // the wire value explicit for every observer that joins later.
   const normalizedPermissionMode = request.permissionMode ?? 'default'
-  currentAbortController = run.abortController
   let cancelled = false
   let failure: string | undefined
   const changelog = await startChangelogTracking({
@@ -564,21 +612,26 @@ async function executeBackgroundRun(
     })
 
     const context = createAgentRuntimeContext({
+      sessionId: run.sessionId,
       projectRoot: run.executionRoot,
       cwd: run.executionRoot,
       originalProjectRoot: run.executionRoot,
+      permissionMode: run.permissionMode,
+      permissionRules: run.session.permissionRules,
+      signal: run.abortController.signal,
       approvalHandler: createBackgroundApprovalHandler(run),
+      onWorktreeEvent: event => withSessionLock(run.session, () => run.session.transcript.appendWorktreeEvent(event)),
       onFileChange: change => changelog.fileChanges.push(change),
       onVerification: result => changelog.verifications.push(result),
     })
 
-    for await (const event of runAgent(run.session.messages, {
+    for await (const event of runAgent(run.messages, {
       context,
       maxTurns: normalizeMaxTurns(request.maxTurns),
       signal: run.abortController.signal,
       refreshSystemPrompt: async currentMessages => {
         const first = currentMessages[0]
-        if (first?.role === 'system') first.content = await buildFreshSystemPrompt(mcpRuntime)
+        if (first?.role === 'system') first.content = await buildFreshSystemPrompt(mcpRuntime, context)
       },
     })) {
       const outputEvent = event.type === 'error' && run.abortController.signal.aborted
@@ -589,12 +642,7 @@ async function executeBackgroundRun(
         else failure = outputEvent.reason
       }
       if (outputEvent.type === 'assistant_text') changelog.assistantResult = outputEvent.text
-      await run.session.transcript.appendEvent(outputEvent)
-      run.session.persistedMessageCount = await recordNewMessages(
-        run.session.transcript,
-        run.session.messages,
-        run.session.persistedMessageCount,
-      )
+      await appendSessionEvent(run.session, outputEvent)
       emitBackgroundRunOutput(run, { type: 'agent_event', event: outputEvent })
     }
   } catch (error) {
@@ -603,14 +651,9 @@ async function executeBackgroundRun(
     if (failure) emitBackgroundRunOutput(run, { type: 'error', error: failure })
   } finally {
     cancelled = cancelled || run.abortController.signal.aborted
-    if (currentAbortController === run.abortController) currentAbortController = null
     const finalStatus: SessionRunStatus = cancelled ? 'cancelled' : failure ? 'failed' : 'completed'
     try {
-      run.session.persistedMessageCount = await recordNewMessages(
-        run.session.transcript,
-        run.session.messages,
-        run.session.persistedMessageCount,
-      )
+      await commitRunMessages(run.session, run.messages, run.baseMessageCount)
       await titlePromise.catch(error => {
         stderr.write(`session title generation failed: ${error instanceof Error ? error.message : String(error)}\n`)
       })
@@ -624,7 +667,6 @@ async function executeBackgroundRun(
       messageCount: run.session.messages.length,
       cancelled,
     })
-    busy = false
   }
 }
 
@@ -730,16 +772,30 @@ async function setBackgroundRunStatus(
 }
 
 async function persistBackgroundRunState(run: BackgroundRun): Promise<void> {
-  const state: SessionRunState = {
-    runId: run.id,
-    status: run.status,
-    startedAt: run.createdAt,
-    updatedAt: run.updatedAt,
-    ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
-    ...(run.error ? { error: run.error } : {}),
-  }
-  run.session.lastRun = state
-  await run.session.transcript.appendRunState(state)
+  await withSessionLock(run.session, async () => {
+    const representative = representativeRunForSession(run)
+    const state: SessionRunState = {
+      runId: representative.id,
+      status: representative.status,
+      startedAt: representative.createdAt,
+      updatedAt: representative.updatedAt,
+      ...(representative.finishedAt ? { finishedAt: representative.finishedAt } : {}),
+      ...(representative.error ? { error: representative.error } : {}),
+    }
+    run.session.lastRun = state
+    await run.session.transcript.appendRunState(state)
+  })
+}
+
+function representativeRunForSession(changedRun: BackgroundRun): BackgroundRun {
+  const sessionRuns = [...backgroundRuns.values()].filter(candidate => (
+    candidate.sessionId === changedRun.sessionId && candidate.workspaceRoot === changedRun.workspaceRoot
+  ))
+  const active = sessionRuns
+    .filter(candidate => isActiveBackgroundRunStatus(candidate.status))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+  if (active) return active
+  return sessionRuns.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? changedRun
 }
 
 function backgroundRunSnapshot(run: BackgroundRun): BackgroundRunSnapshot {
@@ -846,7 +902,10 @@ function trimBackgroundRuns(): void {
   for (const run of completed.slice(50)) backgroundRuns.delete(run.id)
 }
 
-async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<{
+async function autoCompactSessionIfNeeded(
+  session: IdeSessionState,
+  context?: ReturnType<typeof createAgentRuntimeContext>,
+): Promise<{
   beforeMessageCount: number
   afterMessageCount: number
   compactedMessageCount: number
@@ -867,7 +926,7 @@ async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<{
     messages: result.messages,
   })
   session.messages.splice(0, session.messages.length, ...result.messages)
-  await refreshSessionSystemPrompt(session.messages)
+  await refreshSessionSystemPrompt(session.messages, context)
   session.persistedMessageCount = session.messages.length
 
   return {
@@ -881,25 +940,31 @@ async function autoCompactSessionIfNeeded(session: IdeSessionState): Promise<{
 async function activateWorkspace(path: string | undefined): Promise<string> {
   const workspaceRoot = normalizeWorkspaceRoot(path)
   if (workspaceRoot) {
-    process.chdir(workspaceRoot)
-    await setProjectRoot(workspaceRoot)
-    return workspaceRoot
+    const resolved = await realpath(workspaceRoot)
+    const info = await stat(resolved)
+    if (!info.isDirectory()) throw new Error(`workspaceRoot is not a directory: ${workspaceRoot}`)
+    return resolved
   }
-  return getProjectRoot()
+  return AGENT_ROOT
 }
 
 async function ensureIdeSession(workspaceRoot: string, sessionId?: string): Promise<IdeSessionState> {
-  if (
-    activeSession &&
-    activeSession.workspaceRoot === workspaceRoot &&
-    sessionId &&
-    activeSession.transcript.id === sessionId
-  ) {
-    return activeSession
+  if (!sessionId) return registerIdeSession(await openIdeSession({ workspaceRoot }))
+
+  const key = ideSessionKey(workspaceRoot, sessionId)
+  const cached = ideSessions.get(key)
+  if (cached) {
+    lastSessionByWorkspace.set(workspaceRoot, sessionId)
+    return cached
   }
 
-  activeSession = await openIdeSession({ workspaceRoot, resumeId: sessionId })
-  return activeSession
+  const pending = ideSessionLoads.get(key)
+  if (pending) return pending
+  const load = openIdeSession({ workspaceRoot, resumeId: sessionId })
+    .then(registerIdeSession)
+    .finally(() => ideSessionLoads.delete(key))
+  ideSessionLoads.set(key, load)
+  return load
 }
 
 async function openIdeSession(options: {
@@ -912,12 +977,19 @@ async function openIdeSession(options: {
     continueLatest: options.continueLatest === true,
     model: getLLMModel(),
     apiMode: getLLMApiMode(),
+    root: options.workspaceRoot,
   })
 
+  const bootstrapContext = createAgentRuntimeContext({
+    sessionId: opened.transcript.id,
+    projectRoot: opened.metadata.executionRoot ?? options.workspaceRoot,
+    cwd: opened.metadata.executionRoot ?? options.workspaceRoot,
+    originalProjectRoot: opened.metadata.executionRoot ?? options.workspaceRoot,
+  })
   const messages: Message[] = opened.messages.length > 0
     ? opened.messages
-    : [{ role: 'system', content: await buildFreshSystemPrompt(mcpRuntime) }]
-  await refreshSessionSystemPrompt(messages)
+    : [{ role: 'system', content: await buildFreshSystemPrompt(mcpRuntime, bootstrapContext) }]
+  await refreshSessionSystemPrompt(messages, bootstrapContext)
 
   const state: IdeSessionState = {
     transcript: opened.transcript,
@@ -929,27 +1001,45 @@ async function openIdeSession(options: {
     metadata: opened.metadata,
     lastRun: opened.lastRun,
     resumed: opened.resumed,
+    permissionRules: [],
+    operationTail: Promise.resolve(),
   }
   state.lastRun = await recoverInterruptedRun(state.transcript.id, state.lastRun, options.workspaceRoot)
   state.persistedMessageCount = await recordNewMessages(state.transcript, state.messages, state.persistedMessageCount)
   return state
 }
 
-async function generateAndPersistSessionTitle(session: IdeSessionState, prompt: string): Promise<void> {
-  const title = await generateSessionTitle(prompt, AbortSignal.timeout(15_000))
-  if (!title || session.title) return
-  await session.transcript.appendTitle(title, 'ai')
-  session.title = title
-  if (session.metadata.workspace?.kind === 'scratch') {
-    const workspace = { ...session.metadata.workspace, displayName: title }
-    session.metadata = mergeMetadata(session.metadata, { workspace })
-    await session.transcript.appendMetadata({ workspace })
-  }
+function registerIdeSession(session: IdeSessionState): IdeSessionState {
+  ideSessions.set(ideSessionKey(session.workspaceRoot, session.transcript.id), session)
+  lastSessionByWorkspace.set(session.workspaceRoot, session.transcript.id)
+  return session
 }
 
-async function refreshSessionSystemPrompt(messages: Message[]): Promise<void> {
+function ideSessionKey(workspaceRoot: string, sessionId: string): string {
+  return `${workspaceRoot}\u001f${sessionId}`
+}
+
+async function generateAndPersistSessionTitle(session: IdeSessionState, prompt: string): Promise<void> {
+  const title = await generateSessionTitle(prompt, AbortSignal.timeout(15_000))
+  if (!title) return
+  await withSessionLock(session, async () => {
+    if (session.title) return
+    await session.transcript.appendTitle(title, 'ai')
+    session.title = title
+    if (session.metadata.workspace?.kind === 'scratch') {
+      const workspace = { ...session.metadata.workspace, displayName: title }
+      session.metadata = mergeMetadata(session.metadata, { workspace })
+      await session.transcript.appendMetadata({ workspace })
+    }
+  })
+}
+
+async function refreshSessionSystemPrompt(
+  messages: Message[],
+  context?: ReturnType<typeof createAgentRuntimeContext>,
+): Promise<void> {
   const first = messages[0]
-  if (first?.role === 'system') first.content = await buildFreshSystemPrompt(mcpRuntime)
+  if (first?.role === 'system') first.content = await buildFreshSystemPrompt(mcpRuntime, context)
 }
 
 async function recordNewMessages(
@@ -965,9 +1055,59 @@ async function recordNewMessages(
   return messages.length
 }
 
+async function withSessionLock<T>(session: IdeSessionState, operation: () => Promise<T>): Promise<T> {
+  const previous = session.operationTail
+  let release!: () => void
+  session.operationTail = new Promise<void>(resolve => { release = resolve })
+  await previous
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
+
+async function appendSessionEvent(
+  session: IdeSessionState,
+  event: Parameters<SessionTranscript['appendEvent']>[0],
+): Promise<void> {
+  await withSessionLock(session, async () => {
+    await session.transcript.appendEvent(event)
+  })
+}
+
+async function commitRunMessages(
+  session: IdeSessionState,
+  runMessages: Message[],
+  baseMessageCount: number,
+): Promise<void> {
+  const additions = runMessages.slice(baseMessageCount)
+  if (additions.length === 0) return
+  await withSessionLock(session, async () => {
+    for (const message of additions) {
+      const index = session.messages.length
+      session.messages.push(message)
+      await session.transcript.appendMessage(index, message)
+    }
+    session.persistedMessageCount = session.messages.length
+  })
+}
+
+function cloneMessages(messages: Message[]): Message[] {
+  return structuredClone(messages)
+}
+
+function activeBackgroundRuns(): BackgroundRun[] {
+  return [...backgroundRuns.values()].filter(run => isActiveBackgroundRunStatus(run.status))
+}
+
+function activeRunCount(): number {
+  return activeBackgroundRuns().length + foregroundRuns.size
+}
+
 async function handleSessions(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/sessions', `http://${DEFAULT_HOST}`)
-  const workspaceRoot = normalizeWorkspaceRoot(url.searchParams.get('workspaceRoot') ?? undefined) ?? getProjectRoot()
+  const workspaceRoot = await activateWorkspace(url.searchParams.get('workspaceRoot') ?? undefined)
 
   const rawLimit = Number(url.searchParams.get('limit') ?? 20)
   const limit = Number.isInteger(rawLimit) ? Math.max(1, Math.min(50, rawLimit)) : 20
@@ -985,8 +1125,17 @@ async function handleReadSession(req: IncomingMessage, res: ServerResponse): Pro
     writeJson(res, 400, { error: 'sessionId is required' })
     return
   }
-  const workspaceRoot = normalizeWorkspaceRoot(readString(body.workspaceRoot)) ?? getProjectRoot()
-  const session = await readSessionView(sessionId, workspaceRoot)
+  const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
+  const cached = ideSessions.get(ideSessionKey(workspaceRoot, sessionId))
+  const session = cached
+    ? {
+        id: cached.transcript.id,
+        title: cached.title,
+        messages: cached.messages,
+        metadata: cached.metadata,
+        lastRun: cached.lastRun,
+      }
+    : await readSessionView(sessionId, workspaceRoot)
   session.lastRun = await recoverInterruptedRun(session.id, session.lastRun, workspaceRoot)
   writeJson(res, 200, {
     sessionId: session.id,
@@ -1042,15 +1191,23 @@ async function handlePromoteWorkspace(req: IncomingMessage, res: ServerResponse)
   }
 
   const promoted = await promoteScratchWorkspace(workspace, requestedName)
-  const nextMetadata: SessionMetadata = {
-    executionRoot: promoted.path,
-    workspace: promoted,
-  }
-  session.metadata = mergeMetadata(session.metadata, nextMetadata)
-  session.executionRoot = promoted.path
-  await session.transcript.appendMetadata(nextMetadata)
-  await setProjectRoot(promoted.path)
-  await refreshSessionSystemPrompt(session.messages)
+  await withSessionLock(session, async () => {
+    const nextMetadata: SessionMetadata = {
+      executionRoot: promoted.path,
+      workspace: promoted,
+    }
+    session.metadata = mergeMetadata(session.metadata, nextMetadata)
+    session.executionRoot = promoted.path
+    await session.transcript.appendMetadata(nextMetadata)
+    const context = createAgentRuntimeContext({
+      sessionId,
+      projectRoot: promoted.path,
+      cwd: promoted.path,
+      originalProjectRoot: promoted.path,
+      permissionRules: session.permissionRules,
+    })
+    await refreshSessionSystemPrompt(session.messages, context)
+  })
 
   for (const run of backgroundRuns.values()) {
     if (run.sessionId !== sessionId) continue
@@ -1072,11 +1229,19 @@ async function recoverInterruptedRun(
   lastRun: SessionRunState | null,
   workspaceRoot: string,
 ): Promise<SessionRunState | null> {
-  if (!lastRun || !isActiveBackgroundRunStatus(lastRun.status) || backgroundRuns.has(lastRun.runId)) {
+  const liveBackground = backgroundRuns.get(lastRun?.runId ?? '')
+  const liveForeground = foregroundRuns.get(lastRun?.runId ?? '')
+  if (
+    !lastRun
+    || !isActiveBackgroundRunStatus(lastRun.status)
+    || (liveBackground && isActiveBackgroundRunStatus(liveBackground.status))
+    || liveForeground
+  ) {
     return lastRun
   }
   const recovered = await markSessionRunInterrupted(sessionId, workspaceRoot)
-  if (activeSession?.transcript.id === sessionId) activeSession.lastRun = recovered
+  const cached = ideSessions.get(ideSessionKey(workspaceRoot, sessionId))
+  if (cached) cached.lastRun = recovered
   return recovered
 }
 
@@ -1096,9 +1261,16 @@ async function handleSessionTitle(req: IncomingMessage, res: ServerResponse): Pr
     writeJson(res, 400, { error: 'title must be 80 characters or fewer' })
     return
   }
-  const workspaceRoot = normalizeWorkspaceRoot(readString(body.workspaceRoot)) ?? getProjectRoot()
-  await appendSessionTitle(sessionId, title, workspaceRoot)
-  if (activeSession?.transcript.id === sessionId) activeSession.title = title
+  const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
+  const cached = ideSessions.get(ideSessionKey(workspaceRoot, sessionId))
+  if (cached) {
+    await withSessionLock(cached, async () => {
+      await cached.transcript.appendTitle(title, 'user')
+      cached.title = title
+    })
+  } else {
+    await appendSessionTitle(sessionId, title, workspaceRoot)
+  }
   writeJson(res, 200, { ok: true, sessionId, title })
 }
 
@@ -1109,71 +1281,79 @@ async function handleSessionArchive(req: IncomingMessage, res: ServerResponse): 
     writeJson(res, 400, { error: 'sessionId is required' })
     return
   }
-  const workspaceRoot = normalizeWorkspaceRoot(readString(body.workspaceRoot)) ?? getProjectRoot()
+  const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
   await appendSessionArchive(sessionId, true, workspaceRoot)
-  if (activeSession?.transcript.id === sessionId) activeSession = null
+  ideSessions.delete(ideSessionKey(workspaceRoot, sessionId))
+  if (lastSessionByWorkspace.get(workspaceRoot) === sessionId) lastSessionByWorkspace.delete(workspaceRoot)
   writeJson(res, 200, { ok: true, sessionId, archived: true })
 }
 
 async function handleNewSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonBody(req)
   const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
-  activeSession = await openIdeSession({ workspaceRoot })
-  writeJson(res, 200, sessionPayload(activeSession))
+  const session = registerIdeSession(await openIdeSession({ workspaceRoot }))
+  writeJson(res, 200, sessionPayload(session))
 }
 
 async function handleResumeSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonBody(req)
   const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
-  activeSession = await openIdeSession({
+  const session = registerIdeSession(await openIdeSession({
     workspaceRoot,
     resumeId: readString(body.sessionId),
     continueLatest: !readString(body.sessionId),
-  })
-  writeJson(res, 200, sessionPayload(activeSession))
+  }))
+  writeJson(res, 200, sessionPayload(session))
 }
 
 async function handleCompact(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonBody(req)
-  if (readString(body.workspaceRoot)) await activateWorkspace(readString(body.workspaceRoot))
-  if (!activeSession) {
+  const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
+  const sessionId = readString(body.sessionId) ?? lastSessionByWorkspace.get(workspaceRoot)
+  if (!sessionId) {
     writeJson(res, 400, { error: 'No active IDE session to compact.' })
     return
   }
+  const session = await ensureIdeSession(workspaceRoot, sessionId)
+  const payload = await withSessionLock(session, async () => {
+    const result = await compactMessages(session.messages)
+    if (!result.compacted) return { compacted: false as const, reason: result.reason }
 
-  const result = await compactMessages(activeSession.messages)
-  if (!result.compacted) {
-    writeJson(res, 200, { compacted: false, reason: result.reason })
-    return
-  }
-
-  await activeSession.transcript.appendCompactBoundary({
-    beforeMessageCount: result.beforeMessageCount,
-    afterMessageCount: result.afterMessageCount,
-    compactedMessageCount: result.compactedMessageCount,
-    keptRecentMessages: result.keptRecentMessages,
-    summary: result.summary,
-    messages: result.messages,
+    await session.transcript.appendCompactBoundary({
+      beforeMessageCount: result.beforeMessageCount,
+      afterMessageCount: result.afterMessageCount,
+      compactedMessageCount: result.compactedMessageCount,
+      keptRecentMessages: result.keptRecentMessages,
+      summary: result.summary,
+      messages: result.messages,
+    })
+    session.messages.splice(0, session.messages.length, ...result.messages)
+    const context = createAgentRuntimeContext({
+      sessionId,
+      projectRoot: session.executionRoot,
+      cwd: session.executionRoot,
+      originalProjectRoot: session.executionRoot,
+      permissionRules: session.permissionRules,
+    })
+    await refreshSessionSystemPrompt(session.messages, context)
+    session.persistedMessageCount = session.messages.length
+    return {
+      compacted: true as const,
+      sessionId: session.transcript.id,
+      beforeMessageCount: result.beforeMessageCount,
+      afterMessageCount: result.afterMessageCount,
+      compactedMessageCount: result.compactedMessageCount,
+      keptRecentMessages: result.keptRecentMessages,
+      contextChars: estimateContextChars(session.messages),
+    }
   })
-  activeSession.messages.splice(0, activeSession.messages.length, ...result.messages)
-  await refreshSessionSystemPrompt(activeSession.messages)
-  activeSession.persistedMessageCount = activeSession.messages.length
-
-  writeJson(res, 200, {
-    compacted: true,
-    sessionId: activeSession.transcript.id,
-    beforeMessageCount: result.beforeMessageCount,
-    afterMessageCount: result.afterMessageCount,
-    compactedMessageCount: result.compactedMessageCount,
-    keptRecentMessages: result.keptRecentMessages,
-    contextChars: estimateContextChars(activeSession.messages),
-  })
+  writeJson(res, 200, payload)
 }
 
 async function handleDiff(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonBody(req)
-  if (readString(body.workspaceRoot)) await activateWorkspace(readString(body.workspaceRoot))
-  writeJson(res, 200, { text: await formatGitDiff() })
+  const workspaceRoot = await activateWorkspace(readString(body.workspaceRoot))
+  writeJson(res, 200, { text: await formatGitDiff(workspaceRoot) })
 }
 
 async function handleEval(res: ServerResponse): Promise<void> {
@@ -1196,22 +1376,39 @@ async function handleEval(res: ServerResponse): Promise<void> {
 async function handleCancel(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonBody(req)
   const requestedRunId = readString(body.runId)
-  const activeBackgroundRun = [...backgroundRuns.values()].find(run => isActiveBackgroundRunStatus(run.status))
-  if (!validateCancelRun(activeBackgroundRun?.id, requestedRunId).ok) {
+  const activeRuns: Array<{
+    id: string
+    controller: AbortController
+    snapshot?: BackgroundRunSnapshot
+  }> = [
+    ...activeBackgroundRuns().map(run => ({ id: run.id, controller: run.abortController, snapshot: backgroundRunSnapshot(run) })),
+    ...[...foregroundRuns.values()].map(run => ({ id: run.id, controller: run.abortController })),
+  ]
+  const target = requestedRunId
+    ? activeRuns.find(run => run.id === requestedRunId)
+    : activeRuns.length === 1
+      ? activeRuns[0]
+      : undefined
+
+  if (!requestedRunId && activeRuns.length > 1) {
     writeJson(res, 409, {
-      error: activeBackgroundRun
-        ? 'The requested run is not the active run.'
-        : 'The requested run is no longer active.',
+      error: 'Multiple runs are active. Specify runId to cancel exactly one run.',
+      code: 'run_id_required',
+      runs: activeRuns.map(run => run.snapshot).filter(Boolean),
+    })
+    return
+  }
+  if (!target) {
+    writeJson(res, 409, {
+      error: 'The requested run is no longer active.',
       code: 'run_not_active',
-      ...(activeBackgroundRun ? { run: backgroundRunSnapshot(activeBackgroundRun) } : {}),
     })
     return
   }
 
-  const wasActive = Boolean(currentAbortController) || busy
-  currentAbortController?.abort()
-  rejectPendingApprovals(requestedRunId)
-  writeJson(res, 200, { ok: true, cancelled: wasActive, ...(activeBackgroundRun ? { runId: activeBackgroundRun.id } : {}) })
+  target.controller.abort()
+  rejectPendingApprovals(target.id)
+  writeJson(res, 200, { ok: true, cancelled: true, runId: target.id })
 }
 
 function rejectPendingApprovals(runId?: string): void {
@@ -1324,7 +1521,7 @@ async function handleApproval(req: IncomingMessage, res: ServerResponse): Promis
   writeJson(res, 200, { ok: true })
 }
 
-function createIdeApprovalHandler(res: ServerResponse) {
+function createIdeApprovalHandler(res: ServerResponse, runId: string) {
   return async function approve(request: Omit<IdeApprovalRequest, 'id'>): Promise<ConfirmChoice> {
     const id = `approval-${Date.now()}-${++approvalCounter}`
     const approvalRequest: IdeApprovalRequest = { id, ...request }
@@ -1336,7 +1533,7 @@ function createIdeApprovalHandler(res: ServerResponse) {
         pendingApprovals.delete(id)
         resolve('reject_once')
       }, 10 * 60 * 1000)
-      pendingApprovals.set(id, { resolve, timer })
+      pendingApprovals.set(id, { resolve, timer, runId })
     })
 
     writeJsonl(res, { type: 'approval_response', id, choice })
@@ -1423,7 +1620,10 @@ interface ExecError extends Error {
   stderr?: string
 }
 
-main().catch(err => {
-  stderr.write(`fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`)
-  process.exit(1)
-})
+const entryPoint = process.argv[1] ? resolve(process.argv[1]) : ''
+if (entryPoint && fileURLToPath(import.meta.url) === entryPoint) {
+  main().catch(err => {
+    stderr.write(`fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`)
+    process.exit(1)
+  })
+}

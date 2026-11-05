@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import { mkdir, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { getOriginalProjectRoot, getProjectRoot, setProjectRoot } from './workingDirectory.js'
+import type { AgentRuntimeContext } from './runtimeContext.js'
 
 const WORKTREE_DIR = '.jesse/worktrees'
 const VALID_WORKTREE_NAME = /^[A-Za-z0-9._-]+$/
@@ -66,11 +67,27 @@ export function initializeWorktreeRuntime(
   appendWorktreeEvent = eventSink
 }
 
-export function getCurrentWorktreeSession(): WorktreeSession | null {
-  return currentWorktreeSession
+export function getCurrentWorktreeSession(context?: AgentRuntimeContext): WorktreeSession | null {
+  return context ? context.worktreeSession ?? null : currentWorktreeSession
 }
 
-export async function restoreWorktreeSession(session: WorktreeSession | null): Promise<void> {
+export async function restoreWorktreeSession(
+  session: WorktreeSession | null,
+  context?: AgentRuntimeContext,
+): Promise<void> {
+  if (context) {
+    context.worktreeSession = null
+    context.projectRoot = context.originalProjectRoot
+    context.cwd = context.originalProjectRoot
+    if (!session) return
+    const info = await stat(session.worktreePath)
+    if (!info.isDirectory()) throw new Error(`worktree 路径不是目录：${session.worktreePath}`)
+    context.projectRoot = session.worktreePath
+    context.cwd = session.worktreePath
+    context.worktreeSession = session
+    return
+  }
+
   currentWorktreeSession = null
   await setProjectRoot(getOriginalProjectRoot())
 
@@ -84,24 +101,35 @@ export async function restoreWorktreeSession(session: WorktreeSession | null): P
   currentWorktreeSession = session
 }
 
-export async function enterWorktree(input: { name?: unknown } = {}): Promise<WorktreeSession> {
-  if (!activeSessionId) throw new Error('worktree runtime 尚未初始化')
-  if (currentWorktreeSession) {
-    throw new Error(`当前 session 已经在 worktree 中：${currentWorktreeSession.worktreePath}`)
+export async function enterWorktree(
+  input: { name?: unknown } = {},
+  context?: AgentRuntimeContext,
+): Promise<WorktreeSession> {
+  const sessionId = context?.agentId ?? context?.sessionId ?? activeSessionId
+  const currentSession = getCurrentWorktreeSession(context)
+  if (!sessionId) throw new Error('worktree runtime 尚未初始化')
+  if (currentSession) {
+    throw new Error(`当前 session 已经在 worktree 中：${currentSession.worktreePath}`)
   }
 
-  const name = normalizeWorktreeName(input.name, activeSessionId)
-  const session = await createWorktreeSession(name, activeSessionId, getProjectRoot())
+  const name = normalizeWorktreeName(input.name, sessionId)
+  const session = await createWorktreeSession(name, sessionId, context?.projectRoot ?? getProjectRoot())
 
-  process.chdir(session.worktreePath)
-  await setProjectRoot(session.worktreePath)
-  currentWorktreeSession = session
+  if (context) {
+    context.projectRoot = session.worktreePath
+    context.cwd = session.worktreePath
+    context.worktreeSession = session
+  } else {
+    process.chdir(session.worktreePath)
+    await setProjectRoot(session.worktreePath)
+    currentWorktreeSession = session
+  }
 
   await emitWorktreeEvent({
     action: 'entered',
     session,
     message: `Entered worktree ${session.worktreePath} on branch ${session.worktreeBranch}.`,
-  })
+  }, context)
 
   return session
 }
@@ -137,8 +165,11 @@ export async function finishAgentWorktree(session: WorktreeSession): Promise<Age
   }
 }
 
-export async function exitWorktree(input: ExitWorktreeInput): Promise<ExitWorktreeResult> {
-  const session = currentWorktreeSession
+export async function exitWorktree(
+  input: ExitWorktreeInput,
+  context?: AgentRuntimeContext,
+): Promise<ExitWorktreeResult> {
+  const session = getCurrentWorktreeSession(context)
   if (!session) {
     return {
       exited: false,
@@ -153,10 +184,11 @@ export async function exitWorktree(input: ExitWorktreeInput): Promise<ExitWorktr
   }
 
   if (input.action === 'keep') {
-    await restoreOriginalCwd(session)
-    currentWorktreeSession = null
+    await restoreOriginalCwd(session, context)
+    if (context) context.worktreeSession = null
+    else currentWorktreeSession = null
     const message = `Exited worktree. Work is kept at ${session.worktreePath} on branch ${session.worktreeBranch}.`
-    await emitWorktreeEvent({ action: 'kept', session: null, message })
+    await emitWorktreeEvent({ action: 'kept', session: null, message }, context)
     return { exited: true, action: 'keep', session, message }
   }
 
@@ -175,12 +207,13 @@ export async function exitWorktree(input: ExitWorktreeInput): Promise<ExitWorktr
     }
   }
 
-  await restoreOriginalCwd(session)
+  await restoreOriginalCwd(session, context)
   const branchWarning = await removeWorktreeSession(session)
-  currentWorktreeSession = null
+  if (context) context.worktreeSession = null
+  else currentWorktreeSession = null
 
   const message = `Exited and removed worktree ${session.worktreePath}.${branchWarning}`
-  await emitWorktreeEvent({ action: 'removed', session: null, message })
+  await emitWorktreeEvent({ action: 'removed', session: null, message }, context)
   return {
     exited: true,
     action: 'remove',
@@ -191,8 +224,7 @@ export async function exitWorktree(input: ExitWorktreeInput): Promise<ExitWorktr
   }
 }
 
-export function formatWorktreePromptContext(): string {
-  const session = currentWorktreeSession
+export function formatWorktreePromptContext(session: WorktreeSession | null = currentWorktreeSession): string {
   if (!session) return '当前没有 active worktree session。'
   return [
     `当前 active worktree：${session.worktreePath}`,
@@ -201,7 +233,12 @@ export function formatWorktreePromptContext(): string {
   ].join('\n')
 }
 
-async function restoreOriginalCwd(session: WorktreeSession): Promise<void> {
+async function restoreOriginalCwd(session: WorktreeSession, context?: AgentRuntimeContext): Promise<void> {
+  if (context) {
+    context.projectRoot = session.originalCwd
+    context.cwd = session.originalCwd
+    return
+  }
   process.chdir(session.originalCwd)
   await setProjectRoot(session.originalCwd)
 }
@@ -305,6 +342,10 @@ export function validateWorktreeName(name: string): void {
   }
 }
 
-async function emitWorktreeEvent(event: WorktreeEventInput): Promise<void> {
+async function emitWorktreeEvent(event: WorktreeEventInput, context?: AgentRuntimeContext): Promise<void> {
+  if (context?.onWorktreeEvent) {
+    await context.onWorktreeEvent(event)
+    return
+  }
   await appendWorktreeEvent?.(event)
 }

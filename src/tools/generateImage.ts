@@ -34,7 +34,7 @@ export const generateImageTool: Tool = {
     const requestedSize = typeof args.size === 'string' && allowedSizes.has(args.size)
       ? args.size as '1024x1024' | '1024x1536' | '1536x1024'
       : '1536x1024'
-    const generated = await generateImage({ prompt, size: requestedSize })
+    const generated = await generateImage({ prompt, size: requestedSize, signal: context?.signal })
     const parsed = parseImageDataURL(generated.dataURL)
     return {
       content: generated.revisedPrompt

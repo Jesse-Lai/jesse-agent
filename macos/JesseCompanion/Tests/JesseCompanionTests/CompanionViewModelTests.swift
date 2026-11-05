@@ -21,10 +21,11 @@ final class CompanionViewModelTests: XCTestCase {
             CompanionAction.image.agentInstruction(in: .english)
         )
 
-        XCTAssertTrue(chinese.contains("所选内容"))
-        XCTAssertTrue(chinese.contains("生图工具"))
-        XCTAssertTrue(english.contains("selected content"))
-        XCTAssertTrue(english.contains("image-generation tool"))
+        XCTAssertEqual(chinese, "请根据附带的内容生成一张配图，以清晰简要的方式可视化内容表达")
+        XCTAssertEqual(
+            english,
+            "Create an illustration based on the attached content that visualizes its meaning clearly and concisely."
+        )
         XCTAssertNil(CompanionAction.polish.agentInstruction(in: .simplifiedChinese))
     }
 
@@ -292,6 +293,65 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertEqual(model.agentSession?.messages.last?.imageDelivery, .inserted)
     }
 
+    func testConcurrentAgentRunsKeepMessagesAndApprovalsIsolated() throws {
+        let model = CompanionViewModel()
+        let firstKey = model.beginAgentTurn(prompt: "生成第一张图")
+        let secondKey = model.beginAgentTurn(prompt: "生成第二张图")
+        let firstRun = makeAgentRun(id: "run-a", sessionID: "session-shared", status: .running)
+        let secondRun = makeAgentRun(id: "run-b", sessionID: "session-shared", status: .running)
+        model.attachAgentRun(firstRun, localRunID: firstKey)
+        model.attachAgentRun(secondRun, localRunID: secondKey)
+
+        model.applyAgentRunEnvelope(agentTextEnvelope(run: firstRun, cursor: 1, text: "A1"))
+        model.applyAgentRunEnvelope(agentTextEnvelope(run: secondRun, cursor: 2, text: "B"))
+        model.applyAgentRunEnvelope(agentTextEnvelope(run: firstRun, cursor: 3, text: "A2"))
+
+        let assistantMessages = try XCTUnwrap(model.agentSession?.messages.filter { $0.role == "assistant" })
+        XCTAssertEqual(assistantMessages.first(where: { $0.runKey == firstKey })?.text, "A1A2")
+        XCTAssertEqual(assistantMessages.first(where: { $0.runKey == secondKey })?.text, "B")
+
+        let firstApproval = AgentApprovalRequest(
+            id: "approval-a",
+            toolName: "generate_image",
+            title: "First",
+            detail: "First image",
+            args: nil,
+            files: nil,
+            diff: nil,
+            previewError: nil
+        )
+        let secondApproval = AgentApprovalRequest(
+            id: "approval-b",
+            toolName: "generate_image",
+            title: "Second",
+            detail: "Second image",
+            args: nil,
+            files: nil,
+            diff: nil,
+            previewError: nil
+        )
+        model.applyAgentRunEnvelope(AgentRunEnvelope(
+            cursor: 4,
+            run: makeAgentRun(id: "run-a", sessionID: "session-shared", status: .waitingApproval),
+            output: AgentRunOutput(
+                type: "approval_request", event: nil, request: firstApproval, id: nil,
+                choice: nil, error: nil, cancelled: nil
+            )
+        ))
+        model.applyAgentRunEnvelope(AgentRunEnvelope(
+            cursor: 5,
+            run: makeAgentRun(id: "run-b", sessionID: "session-shared", status: .waitingApproval),
+            output: AgentRunOutput(
+                type: "approval_request", event: nil, request: secondApproval, id: nil,
+                choice: nil, error: nil, cancelled: nil
+            )
+        ))
+
+        let runs = try XCTUnwrap(model.agentSession?.runs)
+        XCTAssertEqual(runs.first(where: { $0.runID == "run-a" })?.pendingApproval?.id, "approval-a")
+        XCTAssertEqual(runs.first(where: { $0.runID == "run-b" })?.pendingApproval?.id, "approval-b")
+    }
+
     func testSourceContextCanBeRemovedBeforeSubmission() {
         let model = CompanionViewModel()
         XCTAssertTrue(model.isSourceContextAttached)
@@ -311,6 +371,26 @@ final class CompanionViewModelTests: XCTestCase {
             updatedAt: "2026-08-09T00:00:01.000Z",
             finishedAt: status.isActive ? nil : "2026-08-09T00:00:01.000Z",
             error: nil
+        )
+    }
+
+    private func agentTextEnvelope(
+        run: AgentRunSnapshot,
+        cursor: Int,
+        text: String
+    ) -> AgentRunEnvelope {
+        AgentRunEnvelope(
+            cursor: cursor,
+            run: run,
+            output: AgentRunOutput(
+                type: "agent_event",
+                event: AgentEventPayload(type: "assistant_delta", text: text),
+                request: nil,
+                id: nil,
+                choice: nil,
+                error: nil,
+                cancelled: nil
+            )
         )
     }
 

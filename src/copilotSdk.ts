@@ -480,7 +480,7 @@ function formatCopilotTranscriptMessage(message: Message, index: number): string
 function createPermissionHandler(context?: AgentRuntimeContext) {
   return async function onPermissionRequest(request: CopilotPermissionRequest): Promise<CopilotPermissionResult> {
     const normalized = normalizePermissionRequest(request)
-    const mode = getPermissionMode()
+    const mode = context?.permissionMode ?? getPermissionMode()
 
     const boundaryDecision = await permissionBoundaryDecision(normalized, request, context)
     if (boundaryDecision) return boundaryDecision
@@ -493,7 +493,7 @@ function createPermissionHandler(context?: AgentRuntimeContext) {
     const modeDecision = permissionDecisionForMode(normalized, request, context)
     if (modeDecision) return modeDecision
 
-    const decision = checkPermission(normalized.toolName, normalized.args)
+    const decision = checkPermission(normalized.toolName, normalized.args, context?.permissionRules)
     if (!request.managedApprovalRequired && decision.behavior === 'allow') {
       if (decision.reason) console.log(`\n✅ ${decision.reason}`)
       return { kind: 'approve-once' }
@@ -511,7 +511,7 @@ function createPermissionHandler(context?: AgentRuntimeContext) {
       return { kind: 'reject', feedback: 'User rejected this Copilot SDK operation.' }
     }
     if (choice === 'allow_for_session') {
-      const rule = rememberSessionAllowRule(normalized.toolName, normalized.args)
+      const rule = rememberSessionAllowRule(normalized.toolName, normalized.args, context?.permissionRules)
       console.log(`✅ 已记住本次会话规则：${describeRule(rule)}`)
       return { kind: 'approve-for-session' }
     }
@@ -548,7 +548,7 @@ function permissionDecisionForMode(
   request: CopilotPermissionRequest,
   context?: AgentRuntimeContext,
 ): CopilotPermissionResult | null {
-  const mode = getPermissionMode()
+  const mode = context?.permissionMode ?? getPermissionMode()
 
   if (mode === 'plan') {
     if (request.kind === 'read') return { kind: 'approve-once' }

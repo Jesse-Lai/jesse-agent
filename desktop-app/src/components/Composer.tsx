@@ -146,16 +146,12 @@ export function Composer({
   }, [modeMenuOpen])
 
   const submit = () => {
-    if (running) onCancel()
-    else onSubmit()
+    if (canSubmit) onSubmit()
+    else if (running) onCancel()
   }
 
   const submitFromKeyboard = () => {
-    if (running) {
-      if (queueingEnabled && (value.trim() || annotations.length > 0)) onQueue()
-      return
-    }
-    onSubmit()
+    if (canSubmit) onSubmit()
   }
 
   const selectMode = (mode: ComposerPermissionMode) => {
@@ -164,7 +160,7 @@ export function Composer({
   }
 
   const addImageFiles = async (files: File[]) => {
-    if (running || files.length === 0) return
+    if (files.length === 0) return
     try {
       const next = await prepareImageAttachments(files, attachments)
       onAddAttachments(next)
@@ -178,6 +174,7 @@ export function Composer({
 
   const modeLabel = permissionMode === 'plan' ? 'Plan' : 'Ask for approval'
   const canSubmit = Boolean(value.trim() || annotations.length > 0 || attachments.length > 0)
+  const showsStop = running && !canSubmit
 
   return (
     <form ref={formRef} className="composer" onSubmit={event => { event.preventDefault(); submit() }}>
@@ -327,7 +324,7 @@ export function Composer({
               type="button"
               aria-label="Attach images"
               title="Attach images"
-              disabled={running || attachments.length >= MAX_IMAGE_COUNT}
+              disabled={attachments.length >= MAX_IMAGE_COUNT}
               onClick={() => imageInputRef.current?.click()}
             >
               <span className="fluent-icon icon-add" aria-hidden="true" />
@@ -383,13 +380,13 @@ export function Composer({
             </div>
             <div className="composer-actions">
               <button
-                className={'send-button' + (running ? ' is-running' : '')}
+                className={'send-button' + (showsStop ? ' is-running' : '')}
                 type="submit"
-                aria-label={running ? 'Stop' : 'Send'}
-                title={running ? 'Stop' : 'Send'}
-                disabled={running ? false : !canSubmit || !activeProject}
+                aria-label={showsStop ? 'Stop active tasks' : 'Send'}
+                title={showsStop ? 'Stop active tasks' : 'Send'}
+                disabled={!activeProject || (!canSubmit && !running)}
               >
-                <span className={'fluent-icon ' + (running ? 'icon-stop' : 'icon-arrow-up')} aria-hidden="true" />
+                <span className={'fluent-icon ' + (showsStop ? 'icon-stop' : 'icon-arrow-up')} aria-hidden="true" />
               </button>
             </div>
           </div>

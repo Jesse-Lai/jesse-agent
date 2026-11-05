@@ -38,13 +38,17 @@ export interface PermissionDecision {
 const sessionRules: PermissionRule[] = []
 
 /** 先查硬拦截，再查本次会话规则；能证明只读则放行；否则 ask。 */
-export function checkPermission(toolName: string, args: Record<string, unknown>): PermissionDecision {
+export function checkPermission(
+  toolName: string,
+  args: Record<string, unknown>,
+  rules: PermissionRule[] = sessionRules,
+): PermissionDecision {
   const hardDenyReason = getHardDenyReason(toolName, args)
   if (hardDenyReason) {
     return { behavior: 'deny', reason: hardDenyReason }
   }
 
-  const rule = sessionRules.find(candidate => matchesRule(candidate, toolName, args))
+  const rule = rules.find(candidate => matchesRule(candidate, toolName, args))
   if (rule) {
     return { behavior: rule.behavior, rule, reason: `命中本次会话权限规则：${rule.description}` }
   }
@@ -58,13 +62,17 @@ export function checkPermission(toolName: string, args: Record<string, unknown>)
 }
 
 /** 用户选择“本次会话记住”后，把建议规则加入内存。 */
-export function rememberSessionAllowRule(toolName: string, args: Record<string, unknown>): PermissionRule {
+export function rememberSessionAllowRule(
+  toolName: string,
+  args: Record<string, unknown>,
+  rules: PermissionRule[] = sessionRules,
+): PermissionRule {
   const rule = createSuggestedAllowRule(toolName, args)
 
-  const existing = sessionRules.find(candidate => sameRule(candidate, rule))
+  const existing = rules.find(candidate => sameRule(candidate, rule))
   if (existing) return existing
 
-  sessionRules.push(rule)
+  rules.push(rule)
   return rule
 }
 

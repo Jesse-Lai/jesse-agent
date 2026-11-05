@@ -154,6 +154,7 @@ struct MainConversationMessage: Identifiable, Equatable {
     let role: String
     var text: String
     var attachments: [AgentImageAttachment]
+    var runID: String?
     let createdAt: String?
 
     init(
@@ -161,12 +162,14 @@ struct MainConversationMessage: Identifiable, Equatable {
         role: String,
         text: String,
         attachments: [AgentImageAttachment] = [],
+        runID: String? = nil,
         createdAt: String? = ISO8601DateFormatter().string(from: Date())
     ) {
         self.id = id
         self.role = role
         self.text = text
         self.attachments = attachments
+        self.runID = runID
         self.createdAt = createdAt
     }
 }
@@ -187,7 +190,9 @@ final class MainAppStore: ObservableObject {
     @Published var draft = ""
     @Published var permissionMode = "default"
     @Published var activeRun: AgentRunSnapshot?
+    @Published var activeRuns: [String: AgentRunSnapshot] = [:]
     @Published var pendingApproval: AgentApprovalRequest?
+    @Published var pendingApprovals: [String: AgentApprovalRequest] = [:]
     @Published var queuedPrompt: String?
     @Published var attachments: [DoAnythingImageAttachment] = []
     @Published var workspaceMetadata: DesktopWorkspaceMetadata?
@@ -198,9 +203,18 @@ final class MainAppStore: ObservableObject {
     private let client: AgentClient
     private let defaults: UserDefaults
     private(set) var chatWorkspaceRoot = ""
-    private var runTask: Task<Void, Never>?
+    private var runTasks: [String: Task<Void, Never>] = [:]
     private var globalRunTask: Task<Void, Never>?
-    private var assistantMessageID: UUID?
+    private var assistantMessageIDs: [String: UUID] = [:]
+    private var handledRunEvents: Set<String> = []
+    private var locallyStreamedRunIDs: Set<String> = []
+    private var sessionBootstrap: (
+        id: UUID,
+        workspaceRoot: String,
+        generation: UInt,
+        task: Task<DesktopRunStartResponse, Error>
+    )?
+    private var conversationGeneration: UInt = 0
 
     init(client: AgentClient, defaults: UserDefaults = .standard) {
         self.client = client
@@ -211,7 +225,8 @@ final class MainAppStore: ObservableObject {
     }
 
     deinit {
-        runTask?.cancel()
+        for task in runTasks.values { task.cancel() }
+        sessionBootstrap?.task.cancel()
         globalRunTask?.cancel()
     }
 
@@ -235,7 +250,10 @@ final class MainAppStore: ObservableObject {
         sessions(for: chatWorkspaceRoot)
     }
 
-    var isRunning: Bool { activeRun?.status.isActive == true }
+    var isRunning: Bool {
+        activeRuns.values.contains(where: { $0.status.isActive })
+            || activeRun?.status.isActive == true
+    }
 
     func load() async {
         isLoading = true
@@ -388,26 +406,18 @@ final class MainAppStore: ObservableObject {
     func send() {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!prompt.isEmpty || !attachments.isEmpty), !workspaceRoot.isEmpty else { return }
-        if isRunning {
-            if !attachments.isEmpty {
-                errorMessage = "Images cannot be queued while a run is active."
-                return
-            }
-            queuedPrompt = prompt
-            draft = ""
-            return
-        }
         let submittedAttachments = attachments
         attachments = []
         draft = ""
-        messages.append(MainConversationMessage(
+        let userMessage = MainConversationMessage(
             role: "user",
             text: prompt,
             attachments: submittedAttachments.map {
                 AgentImageAttachment(mimeType: $0.mimeType, dataURL: $0.dataURL, name: $0.name, source: "user")
             }
-        ))
-        startRun(prompt: prompt, attachments: submittedAttachments)
+        )
+        messages.append(userMessage)
+        startRun(prompt: prompt, attachments: submittedAttachments, userMessageID: userMessage.id)
     }
 
     func chooseImages() {
@@ -484,7 +494,6 @@ final class MainAppStore: ObservableObject {
     }
 
     func retryMessage(_ message: MainConversationMessage) {
-        guard !isRunning else { return }
         draft = message.text
         send()
     }
@@ -514,19 +523,27 @@ final class MainAppStore: ObservableObject {
         }
     }
 
-    func stop() async {
+    func stop(runID: String? = nil) async {
+        let targetRunID = runID ?? activeRuns.values
+            .filter { $0.status.isActive }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .first?.id ?? activeRun?.id
+        guard let targetRunID else { return }
         do {
-            try await client.cancelAgentRun(runID: activeRun?.id)
+            try await client.cancelAgentRun(runID: targetRunID)
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func approve(_ choice: String) async {
-        guard let approval = pendingApproval else { return }
+    func approve(_ choice: String, runID: String? = nil) async {
+        let targetRunID = runID ?? pendingApprovals.keys.first ?? activeRun?.id
+        guard let targetRunID,
+              let approval = pendingApprovals[targetRunID] ?? pendingApproval else { return }
         do {
-            try await client.submitApproval(id: approval.id, choice: choice, runID: activeRun?.id)
-            pendingApproval = nil
+            try await client.submitApproval(id: approval.id, choice: choice, runID: targetRunID)
+            pendingApprovals.removeValue(forKey: targetRunID)
+            refreshPendingApproval()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -638,90 +655,170 @@ final class MainAppStore: ObservableObject {
         selectedChangelogImageURL = nil
     }
 
-    private func startRun(prompt: String, attachments: [DoAnythingImageAttachment] = []) {
+    private func startRun(
+        prompt: String,
+        attachments: [DoAnythingImageAttachment] = [],
+        userMessageID: UUID? = nil
+    ) {
         let root = workspaceRoot
         let chatMode: Bool? = scope == .chat ? true : nil
-        assistantMessageID = nil
-        outputs.removeAll()
+        let generation = conversationGeneration
+        let existingSessionID = selectedSessionID
         errorMessage = nil
-        runTask?.cancel()
-        runTask = Task { [weak self] in
+        let makeRequest: (String?) -> DesktopRunStartRequest = { sessionID in
+            DesktopRunStartRequest(
+                prompt: prompt,
+                sessionId: sessionID,
+                permissionMode: self.permissionMode,
+                context: .init(workspaceRoot: root, chatMode: chatMode),
+                attachments: attachments.isEmpty ? nil : attachments
+            )
+        }
+
+        let startTask: Task<DesktopRunStartResponse, Error>
+        let bootstrapID: UUID?
+        if let existingSessionID {
+            startTask = Task { try await client.startRun(makeRequest(existingSessionID)) }
+            bootstrapID = nil
+        } else if let bootstrap = sessionBootstrap,
+                  bootstrap.workspaceRoot == root,
+                  bootstrap.generation == generation {
+            startTask = Task {
+                let first = try await bootstrap.task.value
+                return try await self.client.startRun(makeRequest(first.sessionId))
+            }
+            bootstrapID = nil
+        } else {
+            let id = UUID()
+            let task = Task { try await client.startRun(makeRequest(nil)) }
+            sessionBootstrap = (id, root, generation, task)
+            startTask = task
+            bootstrapID = id
+        }
+
+        let localTaskID = UUID().uuidString
+        let task = Task { [weak self] in
             guard let self else { return }
+            defer { runTasks[localTaskID] = nil }
             do {
-                let start = try await client.startRun(DesktopRunStartRequest(
-                    prompt: prompt,
-                    sessionId: selectedSessionID,
-                    permissionMode: permissionMode,
-                    context: .init(workspaceRoot: root, chatMode: chatMode),
-                    attachments: attachments.isEmpty ? nil : attachments
-                ))
+                let start = try await startTask.value
+                if let bootstrapID, sessionBootstrap?.id == bootstrapID { sessionBootstrap = nil }
+                guard !Task.isCancelled,
+                      conversationGeneration == generation,
+                      workspaceRoot == root,
+                      selectedSessionID == nil || selectedSessionID == existingSessionID || selectedSessionID == start.sessionId else {
+                    return
+                }
                 selectedSessionID = start.sessionId
-                activeRun = start.run
+                if let userMessageID,
+                   let index = messages.firstIndex(where: { $0.id == userMessageID }) {
+                    messages[index].runID = start.runId
+                }
+                registerActiveRun(start.run)
                 workspaceMetadata = start.run.workspace
                 await refreshSessionsIgnoringError(workspaceRoot: root)
+                locallyStreamedRunIDs.insert(start.runId)
+                defer { locallyStreamedRunIDs.remove(start.runId) }
                 for try await envelope in client.streamAgentRun(runID: start.runId, after: start.cursor) {
                     handle(envelope)
                 }
             } catch is CancellationError {
                 return
             } catch {
-                errorMessage = error.localizedDescription
-                activeRun = nil
+                if let bootstrapID, sessionBootstrap?.id == bootstrapID { sessionBootstrap = nil }
+                if conversationGeneration == generation, workspaceRoot == root {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
+        runTasks[localTaskID] = task
     }
 
-    private func handle(_ envelope: AgentRunEnvelope) {
-        activeRun = envelope.run
+    private func handle(_ envelope: AgentRunEnvelope, fromGlobalStream: Bool = false) {
+        if fromGlobalStream, locallyStreamedRunIDs.contains(envelope.run.id) { return }
+        let eventKey = "\(envelope.run.id):\(envelope.cursor)"
+        guard envelope.run.workspaceRoot == workspaceRoot,
+              envelope.run.sessionId == selectedSessionID,
+              handledRunEvents.insert(eventKey).inserted else { return }
+        if envelope.run.status.isActive {
+            registerActiveRun(envelope.run)
+        } else {
+            activeRuns.removeValue(forKey: envelope.run.id)
+            activeRun = newestActiveRun() ?? envelope.run
+            pendingApprovals.removeValue(forKey: envelope.run.id)
+            refreshPendingApproval()
+        }
         guard let output = envelope.output else { return }
         switch output.type {
         case "ready":
-            outputs.append(.init(kind: .activity, title: "Connected", detail: envelope.run.executionRoot, succeeded: true))
+            outputs.append(.init(
+                kind: .activity,
+                title: "Connected",
+                detail: envelope.run.executionRoot,
+                succeeded: true,
+                runID: envelope.run.id
+            ))
         case "approval_request":
-            pendingApproval = output.request
             if let request = output.request {
+                pendingApprovals[envelope.run.id] = request
+                refreshPendingApproval()
                 for file in request.files ?? [] {
-                    outputs.append(.init(kind: .file, title: file, detail: request.detail, succeeded: nil))
+                    outputs.append(.init(
+                        kind: .file,
+                        title: file,
+                        detail: request.detail,
+                        succeeded: nil,
+                        runID: envelope.run.id
+                    ))
                 }
                 if let diff = request.diff, !diff.isEmpty {
-                    outputs.append(.init(kind: .diff, title: "Proposed diff", detail: diff, succeeded: nil))
+                    outputs.append(.init(
+                        kind: .diff,
+                        title: "Proposed diff",
+                        detail: diff,
+                        succeeded: nil,
+                        runID: envelope.run.id
+                    ))
                 }
             }
         case "approval_response":
-            pendingApproval = nil
+            pendingApprovals.removeValue(forKey: envelope.run.id)
+            refreshPendingApproval()
         case "agent_event":
-            if let event = output.event { handle(event) }
+            if let event = output.event { handle(event, runID: envelope.run.id) }
         case "error":
             errorMessage = output.error
         case "done":
-            activeRun = envelope.run
-            pendingApproval = nil
-            assistantMessageID = nil
+            activeRuns.removeValue(forKey: envelope.run.id)
+            activeRun = newestActiveRun() ?? envelope.run
+            pendingApprovals.removeValue(forKey: envelope.run.id)
+            refreshPendingApproval()
+            assistantMessageIDs.removeValue(forKey: envelope.run.id)
             Task { await refreshSessionsIgnoringError(workspaceRoot: envelope.run.workspaceRoot) }
-            if envelope.run.status == .completed, let queued = queuedPrompt {
-                queuedPrompt = nil
-                messages.append(MainConversationMessage(role: "user", text: queued))
-                startRun(prompt: queued)
-            }
         default:
             break
         }
     }
 
-    private func handle(_ event: AgentEventPayload) {
+    private func handle(_ event: AgentEventPayload, runID: String) {
         switch event.type {
         case "assistant_delta":
-            appendAssistant(event.text ?? "")
+            appendAssistant(event.text ?? "", runID: runID)
         case "assistant_text":
-            setAssistant(event.text ?? "")
+            setAssistant(event.text ?? "", runID: runID)
         case "assistant_attachment":
             guard let attachment = event.attachment else { return }
-            if let index = assistantMessageIndex() { messages[index].attachments.append(attachment) }
-            else { messages.append(.init(role: "assistant", text: "", attachments: [attachment])); assistantMessageID = messages.last?.id }
+            if let index = assistantMessageIndex(runID: runID) {
+                if !messages[index].attachments.contains(attachment) { messages[index].attachments.append(attachment) }
+            } else {
+                messages.append(.init(role: "assistant", text: "", attachments: [attachment], runID: runID))
+                assistantMessageIDs[runID] = messages.last?.id
+            }
         case "turn_start":
-            outputs.append(.init(kind: .activity, title: "Thinking", detail: "Agent turn started", succeeded: nil))
+            outputs.append(.init(kind: .activity, title: "Thinking", detail: "Agent turn started", succeeded: nil, runID: runID))
         case "tool_start":
-            outputs.append(.init(kind: .activity, title: event.name ?? "Tool", detail: "Running", succeeded: nil))
+            assistantMessageIDs.removeValue(forKey: runID)
+            outputs.append(.init(kind: .activity, title: event.name ?? "Tool", detail: "Running", succeeded: nil, runID: runID))
         case "tool_result":
             let name = event.name ?? "Tool result"
             let kind: DesktopOutputItem.Kind = switch name {
@@ -729,7 +826,7 @@ final class MainAppStore: ObservableObject {
             case "run_command", "run_background_command": .command
             default: .activity
             }
-            outputs.append(.init(kind: kind, title: name, detail: event.content ?? "", succeeded: event.ok))
+            outputs.append(.init(kind: kind, title: name, detail: event.content ?? "", succeeded: event.ok, runID: runID))
         case "error":
             errorMessage = event.reason
         default:
@@ -737,44 +834,84 @@ final class MainAppStore: ObservableObject {
         }
     }
 
-    private func appendAssistant(_ text: String) {
-        if let index = assistantMessageIndex() { messages[index].text += text }
+    private func appendAssistant(_ text: String, runID: String) {
+        if let index = assistantMessageIndex(runID: runID) { messages[index].text += text }
         else {
-            let message = MainConversationMessage(role: "assistant", text: text)
-            assistantMessageID = message.id
+            let message = MainConversationMessage(role: "assistant", text: text, runID: runID)
+            assistantMessageIDs[runID] = message.id
             messages.append(message)
         }
     }
 
-    private func setAssistant(_ text: String) {
-        if let index = assistantMessageIndex() { messages[index].text = text }
+    private func setAssistant(_ text: String, runID: String) {
+        if let index = assistantMessageIndex(runID: runID) { messages[index].text = text }
         else {
-            let message = MainConversationMessage(role: "assistant", text: text)
-            assistantMessageID = message.id
+            let message = MainConversationMessage(role: "assistant", text: text, runID: runID)
+            assistantMessageIDs[runID] = message.id
             messages.append(message)
         }
     }
 
-    private func assistantMessageIndex() -> Int? {
-        guard let id = assistantMessageID else { return nil }
+    private func assistantMessageIndex(runID: String) -> Int? {
+        guard let id = assistantMessageIDs[runID] else { return nil }
         return messages.firstIndex { $0.id == id }
+    }
+
+    private func registerActiveRun(_ run: AgentRunSnapshot) {
+        activeRuns[run.id] = run
+        activeRun = newestActiveRun()
+    }
+
+    private func newestActiveRun() -> AgentRunSnapshot? {
+        activeRuns.values
+            .filter { $0.status.isActive }
+            .max { $0.updatedAt < $1.updatedAt }
+    }
+
+    private func refreshPendingApproval() {
+        pendingApproval = activeRuns.values
+            .filter { $0.status.isActive && pendingApprovals[$0.id] != nil }
+            .max { $0.updatedAt < $1.updatedAt }
+            .flatMap { pendingApprovals[$0.id] }
+            ?? pendingApprovals.values.first
     }
 
     private func attachToActiveRun() async {
         guard let selectedSessionID else { return }
         do {
             let result = try await client.fetchRuns(sessionID: selectedSessionID, includeEvents: true)
-            guard let run = result.runs.first(where: { $0.status.isActive }) else { return }
-            activeRun = run
-            for envelope in result.events ?? [] where envelope.run.id == run.id { handle(envelope) }
-            runTask?.cancel()
-            runTask = Task { [weak self] in
-                guard let self else { return }
-                do {
-                    for try await envelope in self.client.streamAgentRun(runID: run.id, after: result.cursor) {
-                        self.handle(envelope)
+            let runs = result.runs.filter { $0.status.isActive }
+            guard !runs.isEmpty else { return }
+            let orderedRuns = runs.sorted { $0.createdAt < $1.createdAt }
+            for run in orderedRuns { registerActiveRun(run) }
+            let userMessageIndices = messages.indices.filter {
+                messages[$0].role == "user" && messages[$0].runID == nil
+            }.suffix(orderedRuns.count)
+            for (index, run) in zip(userMessageIndices, orderedRuns) {
+                messages[index].runID = run.id
+            }
+            let runIDs = Set(runs.map(\.id))
+            for envelope in result.events ?? [] where runIDs.contains(envelope.run.id) { handle(envelope) }
+            for run in runs {
+                let taskID = run.id
+                runTasks[taskID]?.cancel()
+                locallyStreamedRunIDs.insert(run.id)
+                runTasks[taskID] = Task { [weak self] in
+                    guard let self else { return }
+                    defer {
+                        self.runTasks[taskID] = nil
+                        self.locallyStreamedRunIDs.remove(run.id)
                     }
-                } catch { self.errorMessage = error.localizedDescription }
+                    do {
+                        for try await envelope in self.client.streamAgentRun(runID: run.id, after: result.cursor) {
+                            self.handle(envelope)
+                        }
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        self.errorMessage = error.localizedDescription
+                    }
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -789,12 +926,7 @@ final class MainAppStore: ObservableObject {
             do {
                 for try await envelope in self.client.streamAllAgentRuns(after: initialCursor) {
                     await self.refreshSessionsIgnoringError(workspaceRoot: envelope.run.workspaceRoot)
-                    guard envelope.run.workspaceRoot == self.workspaceRoot else { continue }
-                    if self.selectedSessionID == envelope.run.sessionId,
-                       self.activeRun == nil,
-                       envelope.run.status.isActive {
-                        await self.attachToActiveRun()
-                    }
+                    self.handle(envelope, fromGlobalStream: true)
                 }
             } catch is CancellationError {
                 return
@@ -833,11 +965,15 @@ final class MainAppStore: ObservableObject {
     }
 
     private func clearConversation() {
-        runTask?.cancel()
-        runTask = nil
+        conversationGeneration &+= 1
+        for task in runTasks.values { task.cancel() }
+        runTasks.removeAll()
+        sessionBootstrap = nil
         selectedSessionID = nil
         activeRun = nil
+        activeRuns = [:]
         pendingApproval = nil
+        pendingApprovals = [:]
         queuedPrompt = nil
         attachments = []
         workspaceMetadata = nil
@@ -845,7 +981,9 @@ final class MainAppStore: ObservableObject {
         selectedChangelogImageURL = nil
         messages = []
         outputs = []
-        assistantMessageID = nil
+        assistantMessageIDs = [:]
+        handledRunEvents = []
+        locallyStreamedRunIDs = []
     }
 
     private func sourceOutputs(from metadata: DesktopSessionMetadata?) -> [DesktopOutputItem] {

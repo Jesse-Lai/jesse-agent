@@ -31,14 +31,14 @@ export const exitWorktreeTool: Tool = {
 
   isReadOnly: false,
 
-  async execute(args) {
+  async execute(args, context) {
     const action = String(args.action ?? '').trim()
     if (action !== 'keep' && action !== 'remove') return '错误：action 必须是 keep 或 remove。'
 
     const result = await exitWorktree({
       action,
       discardChanges: args.discard_changes === true,
-    })
+    }, context)
 
     const lines = [
       `exited: ${result.exited}`,

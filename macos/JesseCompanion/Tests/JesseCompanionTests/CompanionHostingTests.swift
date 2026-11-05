@@ -74,6 +74,59 @@ final class CompanionHostingTests: XCTestCase {
         XCTAssertEqual(editor.pasteCount, 1)
     }
 
+    func testPanelTurnsPastedImageIntoComposerAttachment() throws {
+        let panel = CompanionPanel(
+            contentRect: NSRect(origin: .zero, size: RingGeometry.panelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        let editor = PasteRecordingView(frame: panel.contentView?.bounds ?? .zero)
+        panel.contentView = editor
+        panel.allowsKeyboardFocus = true
+        XCTAssertTrue(panel.makeFirstResponder(editor))
+
+        let pasteboard = NSPasteboard(name: .init("JesseAgent.CompanionHostingTests.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setData(Data([1, 2, 3]), forType: .init("public.png"))
+        panel.pasteboardProvider = { pasteboard }
+        var pastedDataURL: String?
+        panel.imagePasteHandler = { dataURL in
+            pastedDataURL = dataURL
+            return true
+        }
+
+        let event = try pasteEvent(for: panel)
+        XCTAssertTrue(panel.performKeyEquivalent(with: event))
+        XCTAssertEqual(pastedDataURL, "data:image/png;base64,AQID")
+        XCTAssertEqual(editor.pasteCount, 0)
+    }
+
+    func testPanelStillForwardsTextPasteWhenImageHandlerIsInstalled() throws {
+        let panel = CompanionPanel(
+            contentRect: NSRect(origin: .zero, size: RingGeometry.panelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        let editor = PasteRecordingView(frame: panel.contentView?.bounds ?? .zero)
+        panel.contentView = editor
+        panel.allowsKeyboardFocus = true
+        XCTAssertTrue(panel.makeFirstResponder(editor))
+
+        let pasteboard = NSPasteboard(name: .init("JesseAgent.CompanionHostingTests.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        pasteboard.setString("clipboard text", forType: .string)
+        panel.pasteboardProvider = { pasteboard }
+        panel.imagePasteHandler = { _ in
+            XCTFail("Text paste must not invoke the image handler")
+            return true
+        }
+
+        XCTAssertTrue(panel.performKeyEquivalent(with: try pasteEvent(for: panel)))
+        XCTAssertEqual(editor.pasteCount, 1)
+    }
+
     func testMainMenuProvidesStandardPasteKeyEquivalent() throws {
         let mainMenu = CompanionMainMenu.make(language: .simplifiedChinese)
         let editMenu = try XCTUnwrap(mainMenu.items.first?.submenu)
@@ -88,5 +141,20 @@ final class CompanionHostingTests: XCTestCase {
         XCTAssertEqual(pasteItem.action, #selector(NSText.paste(_:)))
         XCTAssertEqual(pasteItem.keyEquivalent, "v")
         XCTAssertEqual(pasteItem.keyEquivalentModifierMask, .command)
+    }
+
+    private func pasteEvent(for panel: NSPanel) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: panel.windowNumber,
+            context: nil,
+            characters: "v",
+            charactersIgnoringModifiers: "v",
+            isARepeat: false,
+            keyCode: 9
+        ))
     }
 }

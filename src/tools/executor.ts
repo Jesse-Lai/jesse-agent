@@ -183,7 +183,7 @@ async function permission(
   args: Record<string, unknown>,
   context?: AgentRuntimeContext,
 ): Promise<PermissionOutcome> {
-  const mode = getPermissionMode()
+  const mode = context?.permissionMode ?? getPermissionMode()
 
   if (mode === 'bypassPermissions') {
     console.log(`\n⚠️  ${permissionModeTitle(mode)} 模式：跳过权限确认。`)
@@ -216,7 +216,7 @@ async function permission(
     console.log(`\n⚠️  ${permissionModeTitle(mode)} 模式不会自动允许项目外文件编辑，改走正常确认。`)
   }
 
-  const decision = checkPermission(tool.name, args)
+  const decision = checkPermission(tool.name, args, context?.permissionRules)
   if (decision.behavior === 'allow') {
     if (decision.reason) console.log(`\n✅ ${decision.reason}`)
     return continueWithoutPermissionNote()
@@ -239,7 +239,7 @@ async function permission(
   }
 
   if (choice === 'allow_for_session') {
-    const rule = rememberSessionAllowRule(tool.name, args)
+    const rule = rememberSessionAllowRule(tool.name, args, context?.permissionRules)
     console.log(`✅ 已记住本次会话规则：${describeRule(rule)}`)
     return continueWithApprovalNote(tool.name, 'allow_for_session')
   }

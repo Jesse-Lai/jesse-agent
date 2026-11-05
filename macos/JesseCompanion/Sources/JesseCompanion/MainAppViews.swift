@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MainAppRootView: View {
     @ObservedObject var store: MainAppStore
@@ -207,6 +208,7 @@ struct MainAppRootView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(store.messages) { message in
+                            let activities = reasoningActivities(for: message)
                             MainMessageView(
                                 message: message,
                                 edit: { store.editMessage(message) },
@@ -219,10 +221,10 @@ struct MainAppRootView: View {
                                 alignment: message.role == "user" ? .trailing : .leading
                             )
 
-                            if message.id == reasoningAnchorMessageID, !reasoningActivities.isEmpty {
+                            if !activities.isEmpty {
                                 MainReasoningView(
-                                    activities: reasoningActivities,
-                                    running: store.isRunning
+                                    activities: activities,
+                                    running: isRunActive(for: message)
                                 )
                                 .id(MainConversationLayout.reasoningViewID)
                                 .frame(width: readingColumnWidth, alignment: .leading)
@@ -249,8 +251,8 @@ struct MainAppRootView: View {
                         withAnimation { proxy.scrollTo(id, anchor: .bottom) }
                     }
                 }
-                .onChange(of: reasoningActivities) { _, activities in
-                    guard !activities.isEmpty else { return }
+                .onChange(of: store.outputs) { _, outputs in
+                    guard !outputs.isEmpty else { return }
                     withAnimation {
                         proxy.scrollTo(MainConversationLayout.reasoningViewID, anchor: .bottom)
                     }
@@ -261,18 +263,34 @@ struct MainAppRootView: View {
 
     private var activeConversationControls: some View {
         VStack(spacing: 0) {
-            if let approval = store.pendingApproval {
-                approvalCard(approval)
-            }
-            if let queued = store.queuedPrompt {
-                HStack {
-                    Image(systemName: "arrow.turn.down.right")
-                    Text(queued).lineLimit(1)
-                    Spacer()
-                    Button("Edit") { store.draft = queued; store.queuedPrompt = nil }
-                    Button("Delete") { store.queuedPrompt = nil }
+            ForEach(store.pendingApprovals.keys.sorted(), id: \.self) { runID in
+                if let approval = store.pendingApprovals[runID] {
+                    approvalCard(approval, runID: runID)
                 }
-                .font(.caption).padding(10).background(.quaternary)
+            }
+            if store.pendingApprovals.isEmpty,
+               let approval = store.pendingApproval,
+               let runID = store.activeRun?.id {
+                approvalCard(approval, runID: runID)
+            }
+            if !store.activeRuns.isEmpty {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(store.activeRuns.count == 1 ? "1 task running" : "\(store.activeRuns.count) tasks running")
+                    Spacer()
+                    Menu("Stop") {
+                        ForEach(store.activeRuns.values.sorted { $0.createdAt < $1.createdAt }) { run in
+                            Button("Stop task \(shortRunID(run.id))") {
+                                Task { await store.stop(runID: run.id) }
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
             composer
                 .padding(.bottom, 32)
@@ -349,30 +367,17 @@ struct MainAppRootView: View {
                 .onHover { permissionModeHovering = $0 }
 
                 Spacer()
-                if store.isRunning {
-                    Button { Task { await store.stop() } } label: {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(MainPalette.mainBackground(colorScheme))
-                            .frame(width: 36, height: 36)
-                            .background(MainPalette.foreground(colorScheme), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .frame(height: MainComposerMetrics.actionHeight, alignment: .center)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                } else {
-                    Button(action: send) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(sendDisabled ? Color(hex: 0x87898D) : MainPalette.mainBackground(colorScheme))
-                            .frame(width: 36, height: 36)
-                            .background(sendDisabled ? Color(hex: 0xE0E0E0) : MainPalette.foreground(colorScheme), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(sendDisabled)
-                    .frame(height: MainComposerMetrics.actionHeight, alignment: .center)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
+                Button(action: send) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(sendDisabled ? Color(hex: 0x87898D) : MainPalette.mainBackground(colorScheme))
+                        .frame(width: 36, height: 36)
+                        .background(sendDisabled ? Color(hex: 0xE0E0E0) : MainPalette.foreground(colorScheme), in: Circle())
                 }
+                .buttonStyle(.plain)
+                .disabled(sendDisabled)
+                .frame(height: MainComposerMetrics.actionHeight, alignment: .center)
+                .frame(maxHeight: .infinity, alignment: .bottom)
             }
             .frame(
                 height: max(MainComposerMetrics.actionHeight, composerTextHeight),
@@ -431,8 +436,16 @@ struct MainAppRootView: View {
         store.messages.last(where: { $0.role == "user" })?.id
     }
 
-    private var reasoningActivities: [DesktopOutputItem] {
-        store.outputs.filter { output in
+    private func reasoningActivities(for message: MainConversationMessage) -> [DesktopOutputItem] {
+        guard message.role == "user" else { return [] }
+        let candidates: [DesktopOutputItem]
+        if let runID = message.runID {
+            candidates = store.outputs.filter { $0.runID == runID }
+        } else {
+            guard message.id == reasoningAnchorMessageID else { return [] }
+            candidates = store.outputs.filter { $0.runID == nil }
+        }
+        return candidates.filter { output in
             switch output.kind {
             case .activity:
                 output.title != "Connected"
@@ -444,7 +457,12 @@ struct MainAppRootView: View {
         }
     }
 
-    private func approvalCard(_ approval: AgentApprovalRequest) -> some View {
+    private func isRunActive(for message: MainConversationMessage) -> Bool {
+        guard let runID = message.runID else { return store.isRunning }
+        return store.activeRuns[runID]?.status.isActive == true
+    }
+
+    private func approvalCard(_ approval: AgentApprovalRequest, runID: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(approval.title).font(.headline)
             Text(approval.detail).font(.caption).foregroundStyle(.secondary)
@@ -453,10 +471,10 @@ struct MainAppRootView: View {
                     .frame(maxHeight: 120)
             }
             HStack {
-                Button("Reject") { Task { await store.approve("reject_once") } }
+                Button("Reject") { Task { await store.approve("reject_once", runID: runID) } }
                 Spacer()
-                Button("Allow for session") { Task { await store.approve("allow_for_session") } }
-                Button("Allow once") { Task { await store.approve("allow_once") } }.buttonStyle(.borderedProminent)
+                Button("Allow for session") { Task { await store.approve("allow_for_session", runID: runID) } }
+                Button("Allow once") { Task { await store.approve("allow_once", runID: runID) } }.buttonStyle(.borderedProminent)
             }
         }
         .padding(14)
@@ -464,6 +482,10 @@ struct MainAppRootView: View {
         .background(MainPalette.raised(colorScheme), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(MainPalette.divider(colorScheme)))
         .padding(.horizontal, 16)
+    }
+
+    private func shortRunID(_ runID: String) -> String {
+        String(runID.prefix(8))
     }
 
     private var inspector: some View {
@@ -1443,19 +1465,193 @@ private struct MainMarkdownTableView: View {
 
 private struct MainAttachmentView: View {
     let attachment: AgentImageAttachment
+    @State private var image: NSImage?
+    @State private var imageData: Data?
+    @State private var isLoading = true
+    @State private var isPreviewPresented = false
+    @State private var loadFailed = false
 
     var body: some View {
-        Group {
-            if let dataURL = attachment.dataURL, let image = DataURLDecoder.image(dataURL) {
-                Image(nsImage: image).resizable().scaledToFit()
-            } else if let url = attachment.url, let remote = URL(string: url, relativeTo: AgentServerManager.baseURL) {
-                AsyncImage(url: remote) { image in image.resizable().scaledToFit() } placeholder: { ProgressView() }
-            } else {
-                Image(systemName: "photo")
+        Button {
+            guard image != nil else { return }
+            isPreviewPresented = true
+        } label: {
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else if isLoading {
+                    ProgressView()
+                } else {
+                    Image(systemName: loadFailed ? "exclamationmark.triangle" : "photo")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 180, height: 130)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.primary.opacity(0.1), lineWidth: 0.7)
             }
         }
-        .frame(width: 180, height: 130)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .buttonStyle(.plain)
+        .disabled(image == nil)
+        .help(image == nil ? "Image unavailable" : "Click to preview image")
+        .accessibilityLabel("Preview \(displayName)")
+        .contextMenu {
+            Button("Copy Image", systemImage: "doc.on.doc") {
+                copyImage()
+            }
+            .disabled(image == nil)
+
+            Divider()
+
+            Button("Download Image…", systemImage: "arrow.down.circle") {
+                downloadImage()
+            }
+            .disabled(imageData == nil)
+        }
+        .task(id: sourceIdentifier) {
+            await loadImage()
+        }
+        .sheet(isPresented: $isPreviewPresented) {
+            if let image {
+                MainAttachmentPreview(
+                    image: image,
+                    name: displayName,
+                    copy: copyImage,
+                    download: downloadImage
+                )
+            }
+        }
+    }
+
+    private var displayName: String {
+        let name = attachment.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name?.isEmpty == false ? name! : "Generated image"
+    }
+
+    private var sourceIdentifier: String {
+        attachment.assetId ?? attachment.url ?? attachment.dataURL ?? displayName
+    }
+
+    @MainActor
+    private func loadImage() async {
+        isLoading = true
+        loadFailed = false
+
+        if let dataURL = attachment.dataURL,
+           let data = DataURLDecoder.decode(dataURL),
+           let decodedImage = NSImage(data: data) {
+            imageData = data
+            image = decodedImage
+            isLoading = false
+            return
+        }
+
+        guard let value = attachment.url,
+              let remoteURL = URL(string: value, relativeTo: AgentServerManager.baseURL)?.absoluteURL else {
+            isLoading = false
+            loadFailed = true
+            return
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: remoteURL)
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200 ... 299).contains(httpResponse.statusCode) {
+                throw URLError(.badServerResponse)
+            }
+            guard let decodedImage = NSImage(data: data) else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            imageData = data
+            image = decodedImage
+            isLoading = false
+        } catch is CancellationError {
+            return
+        } catch {
+            isLoading = false
+            loadFailed = true
+        }
+    }
+
+    private func downloadImage() {
+        guard let imageData else { return }
+        let panel = NSSavePanel()
+        panel.title = "Download Image"
+        panel.prompt = "Download"
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedFilename
+        if let contentType = UTType(mimeType: attachment.mimeType) {
+            panel.allowedContentTypes = [contentType]
+        }
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            do {
+                try imageData.write(to: destination, options: .atomic)
+            } catch {
+                NSAlert(error: error).runModal()
+            }
+        }
+    }
+
+    private func copyImage() {
+        guard let image else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([image])
+    }
+
+    private var suggestedFilename: String {
+        let fallbackExtension = UTType(mimeType: attachment.mimeType)?.preferredFilenameExtension ?? "png"
+        let rawName = displayName == "Generated image" ? "Generated image.\(fallbackExtension)" : displayName
+        let filename = URL(fileURLWithPath: rawName).lastPathComponent
+        return (filename as NSString).pathExtension.isEmpty
+            ? "\(filename).\(fallbackExtension)"
+            : filename
+    }
+}
+
+private struct MainAttachmentPreview: View {
+    @Environment(\.dismiss) private var dismiss
+    let image: NSImage
+    let name: String
+    let copy: () -> Void
+    let download: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 20)
+                Button("Download", systemImage: "arrow.down.circle", action: download)
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 52)
+
+            Divider()
+
+            ZStack {
+                Color(nsColor: .underPageBackgroundColor)
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(24)
+                    .contextMenu {
+                        Button("Copy Image", systemImage: "doc.on.doc", action: copy)
+                        Divider()
+                        Button("Download Image…", systemImage: "arrow.down.circle", action: download)
+                    }
+            }
+        }
+        .frame(width: 760, height: 560)
+        .accessibilityIdentifier("image-preview")
     }
 }

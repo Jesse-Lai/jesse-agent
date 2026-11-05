@@ -178,6 +178,8 @@ export interface OpenSessionOptions {
   continueLatest: boolean
   model: string
   apiMode: string
+  /** Workspace that owns the .jesse/sessions directory. Defaults to process.cwd(). */
+  root?: string
 }
 
 export interface OpenedSession {
@@ -222,12 +224,12 @@ export class SessionTranscript {
     readonly filePath: string,
   ) {}
 
-  async appendStart(model: string, apiMode: string): Promise<void> {
-    await this.append({ type: 'session_start', cwd: cwd(), model, apiMode })
+  async appendStart(model: string, apiMode: string, sessionCwd = cwd()): Promise<void> {
+    await this.append({ type: 'session_start', cwd: sessionCwd, model, apiMode })
   }
 
-  async appendResume(): Promise<void> {
-    await this.append({ type: 'session_resume', cwd: cwd() })
+  async appendResume(sessionCwd = cwd()): Promise<void> {
+    await this.append({ type: 'session_resume', cwd: sessionCwd })
   }
 
   async appendMetadata(metadata: SessionMetadata): Promise<void> {
@@ -289,7 +291,8 @@ export class SessionTranscript {
 }
 
 export async function openSession(options: OpenSessionOptions): Promise<OpenedSession> {
-  await mkdir(sessionDir(), { recursive: true })
+  const root = options.root ?? cwd()
+  await mkdir(sessionDir(root), { recursive: true })
 
   if (options.resumeId && options.continueLatest) {
     throw new Error('不能同时使用 --resume 和 --continue')
@@ -297,14 +300,14 @@ export async function openSession(options: OpenSessionOptions): Promise<OpenedSe
 
   if (options.resumeId || options.continueLatest) {
     const filePath = options.resumeId
-      ? resolveSessionPath(options.resumeId)
-      : await latestSessionPath()
+      ? resolveSessionPath(options.resumeId, root)
+      : await latestSessionPath(root)
     if (!filePath) throw new Error('没有可继续的历史 session')
 
     const id = sessionIdFromPath(filePath)
     const transcript = new SessionTranscript(id, filePath)
     const state = await loadSessionState(filePath)
-    await transcript.appendResume()
+    await transcript.appendResume(root)
     return {
       transcript,
       messages: state.messages,
@@ -317,9 +320,9 @@ export async function openSession(options: OpenSessionOptions): Promise<OpenedSe
   }
 
   const id = createSessionId()
-  const filePath = join(sessionDir(), `${id}.jsonl`)
+  const filePath = join(sessionDir(root), `${id}.jsonl`)
   const transcript = new SessionTranscript(id, filePath)
-  await transcript.appendStart(options.model, options.apiMode)
+  await transcript.appendStart(options.model, options.apiMode, root)
   return {
     transcript,
     messages: [],
@@ -706,8 +709,8 @@ function resolveSessionPath(idOrPath: string, root = cwd()): string {
   return resolve(join(sessionDir(root), `${idOrPath}.jsonl`))
 }
 
-async function latestSessionPath(): Promise<string | undefined> {
-  const dir = sessionDir()
+async function latestSessionPath(root = cwd()): Promise<string | undefined> {
+  const dir = sessionDir(root)
   if (!existsSync(dir)) return undefined
   const entries = await readdir(dir)
   const files = entries.filter(entry => entry.endsWith('.jsonl'))

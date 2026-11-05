@@ -47,9 +47,16 @@ import type {
 let itemSequence = 0
 
 interface RunConversationTarget {
+  clientId: string
   key: string
   projectPath: string
   scope: ConversationScope
+  runId?: string
+  assistantId: string | null
+  assistantText: string
+  activityId: string | null
+  currentTool: ToolInProgress | null
+  userMessageId?: string
 }
 
 type DesktopPermissionMode = 'default' | 'plan'
@@ -71,7 +78,7 @@ export function App() {
   const [activeSessionTitle, setActiveSessionTitle] = useState('')
   const [activeSessionWorkspace, setActiveSessionWorkspace] = useState<SessionWorkspaceMetadata | null>(null)
   const [activeConversationKey, setActiveConversationKeyState] = useState(() => conversationKey(readStoredConversationScope(), activeProject, null))
-  const [runningConversationKey, setRunningConversationKeyState] = useState<string | null>(null)
+  const [activeRunRevision, setActiveRunRevision] = useState(0)
   const [draft, setDraft] = useState('')
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedComposerItem[]>([])
   const [queueStatus, setQueueStatus] = useState('')
@@ -96,28 +103,29 @@ export function App() {
   const expandedProjectsRef = useRef(expandedProjects)
   const sessionIdRef = useRef(sessionId)
   const activeConversationKeyRef = useRef(activeConversationKey)
-  const runningConversationKeyRef = useRef(runningConversationKey)
   const draftRef = useRef(draft)
   const queuedPromptsRef = useRef<QueuedComposerItem[]>(queuedPrompts)
   const queueAdvancePendingRef = useRef(false)
   const permissionModeRef = useRef(permissionMode)
   const composerAnnotationsRef = useRef<ComposerAnnotation[]>(composerAnnotations)
   const composerAttachmentsRef = useRef<ComposerImageAttachment[]>(composerAttachments)
-  const currentAssistantRef = useRef<string | null>(null)
-  const currentAssistantTextRef = useRef('')
-  const currentActivityRef = useRef<string | null>(null)
-  const currentToolRef = useRef<ToolInProgress | null>(null)
-  const currentUserMessageByTargetRef = useRef<Map<string, string>>(new Map())
-  const approvalRequestsRef = useRef<Map<string, ApprovalRequest>>(new Map())
+  const activeRunTargetsRef = useRef<Map<string, RunConversationTarget>>(new Map())
+  const runTargetsByRunIdRef = useRef<Map<string, RunConversationTarget>>(new Map())
+  const locallyStreamedRunIdsRef = useRef<Set<string>>(new Set())
+  const approvalRequestsRef = useRef<Map<string, { request: ApprovalRequest; target: RunConversationTarget }>>(new Map())
   const backgroundEventsRef = useRef<Map<string, AgentRunEnvelope[]>>(new Map())
   const backgroundRunsRef = useRef<Map<string, AgentRunSnapshot>>(new Map())
   const backgroundEventKeysRef = useRef<Set<string>>(new Set())
+  const sessionBootstrapRef = useRef<Promise<string> | null>(null)
   const sessionRefreshTimersRef = useRef<Map<string, number>>(new Map())
   const changelogRequestRef = useRef(0)
   const asciiCurtainRef = useRef<AsciiCurtainHandle>(null)
   const composerRef = useRef<HTMLFormElement>(null)
   const themeMode = manualThemeMode ?? autoThemeMode
-  const running = runningConversationKey === activeConversationKey
+  void activeRunRevision
+  const activeConversationRuns = [...activeRunTargetsRef.current.values()]
+    .filter(target => target.key === activeConversationKey)
+  const running = activeConversationRuns.length > 0
 
   useEffect(() => {
     void initializeDesktop()
@@ -166,7 +174,7 @@ export function App() {
         if (cancelled) return
         cursor = Number.isSafeInteger(snapshot.cursor) && (snapshot.cursor ?? 0) >= 0 ? snapshot.cursor ?? 0 : 0
         for (const run of snapshot.runs ?? []) {
-          backgroundRunsRef.current.set(run.sessionId, run)
+          backgroundRunsRef.current.set(run.id, run)
           scheduleSessionRefresh(run.workspaceRoot)
         }
       } catch {
@@ -222,11 +230,7 @@ export function App() {
   const setActiveConversationKey = (value: string) => {
     activeConversationKeyRef.current = value
     setActiveConversationKeyState(value)
-  }
-
-  const setRunningConversationKey = (value: string | null) => {
-    runningConversationKeyRef.current = value
-    setRunningConversationKeyState(value)
+    refreshVisibleApproval(value)
   }
 
   const setDraftValue = (value: string) => {
@@ -256,11 +260,6 @@ export function App() {
   }
 
   const resetConversationRuntimeState = () => {
-    currentAssistantRef.current = null
-    currentAssistantTextRef.current = ''
-    currentActivityRef.current = null
-    currentToolRef.current = null
-    approvalRequestsRef.current = new Map()
     setOutputFiles([])
     setCommandOutputs([])
     setSourceItems([])
@@ -273,6 +272,56 @@ export function App() {
     setRunSteps(createRunSteps())
     setShowRunProgress(false)
     setPendingApproval(null)
+  }
+
+  function createRunTarget(
+    scope: ConversationScope,
+    projectPath: string,
+    key = activeConversationKeyRef.current,
+  ): RunConversationTarget {
+    return {
+      clientId: nextItemId('client-run'),
+      key,
+      projectPath,
+      scope,
+      assistantId: null,
+      assistantText: '',
+      activityId: null,
+      currentTool: null,
+    }
+  }
+
+  function registerRunTarget(target: RunConversationTarget) {
+    activeRunTargetsRef.current.set(target.clientId, target)
+    if (target.runId) runTargetsByRunIdRef.current.set(target.runId, target)
+    setActiveRunRevision(value => value + 1)
+  }
+
+  function bindRunTarget(target: RunConversationTarget, run: AgentRunSnapshot) {
+    target.runId = run.id
+    backgroundRunsRef.current.set(run.id, run)
+    runTargetsByRunIdRef.current.set(run.id, target)
+    registerRunTarget(target)
+  }
+
+  function finishRunTarget(target: RunConversationTarget) {
+    activeRunTargetsRef.current.delete(target.clientId)
+    if (target.runId) runTargetsByRunIdRef.current.delete(target.runId)
+    for (const [approvalId, entry] of approvalRequestsRef.current) {
+      if (entry.target === target) approvalRequestsRef.current.delete(approvalId)
+    }
+    refreshVisibleApproval()
+    setActiveRunRevision(value => value + 1)
+  }
+
+  function refreshVisibleApproval(targetKey = activeConversationKeyRef.current) {
+    const entry = [...approvalRequestsRef.current.values()]
+      .find(candidate => candidate.target.key === targetKey)
+    setPendingApproval(entry ? {
+      request: entry.request,
+      status: 'Waiting for approval',
+      disabled: false,
+    } : null)
   }
 
   const setExpandedProjects = (value: Set<string>) => {
@@ -527,31 +576,37 @@ export function App() {
     const query = new URLSearchParams({ sessionId: targetSessionId, includeEvents: '1' })
     const result = await getJson<{ runs?: AgentRunSnapshot[]; events?: AgentRunEnvelope[] }>(`/api/runs?${query}`)
     for (const envelope of result.events ?? []) cacheBackgroundEnvelope(envelope)
-    const run = (result.runs ?? []).find(candidate => isActiveRunStatus(candidate.status))
-    if (!run) return
+    const runs = (result.runs ?? []).filter(candidate => isActiveRunStatus(candidate.status))
+    if (runs.length === 0) return
 
-    backgroundRunsRef.current.set(targetSessionId, run)
-    const target: RunConversationTarget = {
-      key: conversationKey(scope, workspaceRoot, targetSessionId),
-      projectPath: workspaceRoot,
-      scope,
-    }
-    setRunningConversationKey(target.key)
-    currentAssistantRef.current = null
-    currentAssistantTextRef.current = ''
-    currentActivityRef.current = null
-    currentToolRef.current = null
-    setConversation(trimConversationForActiveRun(loadedConversation))
+    setConversation(loadedConversation)
     startRunProgress()
-    startActivityStream(target.key)
-
+    const targetKey = conversationKey(scope, workspaceRoot, targetSessionId)
     const envelopes = backgroundEventsRef.current.get(targetSessionId) ?? []
-    for (const envelope of envelopes.filter(candidate => candidate.run.id === run.id)) {
-      if (envelope.output) handleBridgeOutput(envelope.output, target)
+    for (const run of runs) {
+      const target = runTargetsByRunIdRef.current.get(run.id)
+        ?? createRunTarget(scope, workspaceRoot, targetKey)
+      target.key = targetKey
+      target.assistantId = null
+      target.assistantText = ''
+      target.activityId = null
+      target.currentTool = null
+      bindRunTarget(target, run)
+      startActivityStream(target)
+      for (const envelope of envelopes.filter(candidate => candidate.run.id === run.id)) {
+        if (envelope.output) handleBridgeOutput(envelope.output, target)
+      }
     }
+    refreshVisibleApproval(targetKey)
   }
 
-  function receiveBackgroundEnvelope(envelope: AgentRunEnvelope) {
+  function receiveBackgroundEnvelope(envelope: AgentRunEnvelope, preferredTarget?: RunConversationTarget) {
+    if (!preferredTarget && locallyStreamedRunIdsRef.current.has(envelope.run.id)) {
+      cacheBackgroundEnvelope(envelope)
+      backgroundRunsRef.current.set(envelope.run.id, envelope.run)
+      scheduleSessionRefresh(envelope.run.workspaceRoot)
+      return
+    }
     const key = `${envelope.run.id}:${envelope.cursor}`
     if (backgroundEventKeysRef.current.has(key)) return
     backgroundEventKeysRef.current.add(key)
@@ -561,12 +616,27 @@ export function App() {
     }
 
     cacheBackgroundEnvelope(envelope)
-    backgroundRunsRef.current.set(envelope.run.sessionId, envelope.run)
+    backgroundRunsRef.current.set(envelope.run.id, envelope.run)
     scheduleSessionRefresh(envelope.run.workspaceRoot)
+
+    let target = preferredTarget ?? runTargetsByRunIdRef.current.get(envelope.run.id)
+    if (!target && isActiveRunStatus(envelope.run.status)) {
+      target = [...activeRunTargetsRef.current.values()].find(candidate => (
+        !candidate.runId
+        && candidate.projectPath === envelope.run.workspaceRoot
+        && (candidate.key.endsWith(':session:new') || candidate.key.endsWith(`:session:${envelope.run.sessionId}`))
+      ))
+    }
+    if (target) bindRunTarget(target, envelope.run)
 
     const activeScope = activeScopeRef.current
     const activeWorkspaceRoot = activeScope === 'chat' ? chatWorkspaceRootRef.current : activeProjectRef.current
-    if (sessionIdRef.current !== envelope.run.sessionId || activeWorkspaceRoot !== envelope.run.workspaceRoot) return
+    const isVisible = sessionIdRef.current === envelope.run.sessionId
+      && activeWorkspaceRoot === envelope.run.workspaceRoot
+    if (!isVisible) {
+      if (!isActiveRunStatus(envelope.run.status) && target) finishRunTarget(target)
+      return
+    }
 
     setActiveSessionWorkspace(envelope.run.workspace ?? {
       id: envelope.run.sessionId,
@@ -575,25 +645,22 @@ export function App() {
       displayName: 'Temporary workspace',
     })
 
-    const target: RunConversationTarget = {
-      key: conversationKey(activeScope, envelope.run.workspaceRoot, envelope.run.sessionId),
-      projectPath: envelope.run.workspaceRoot,
-      scope: activeScope,
+    if (!target) {
+      target = createRunTarget(
+        activeScope,
+        envelope.run.workspaceRoot,
+        conversationKey(activeScope, envelope.run.workspaceRoot, envelope.run.sessionId),
+      )
+      bindRunTarget(target, envelope.run)
     }
-    if (isActiveRunStatus(envelope.run.status) && runningConversationKeyRef.current !== target.key) {
-      setRunningConversationKey(target.key)
-      currentAssistantRef.current = null
-      currentAssistantTextRef.current = ''
-      currentActivityRef.current = null
-      currentToolRef.current = null
+    if (isActiveRunStatus(envelope.run.status) && !target.activityId) {
       startRunProgress()
-      startActivityStream(target.key)
+      startActivityStream(target)
     }
     if (envelope.output) handleBridgeOutput(envelope.output, target)
 
     if (envelope.output?.type === 'done' || !isActiveRunStatus(envelope.run.status)) {
-      if (runningConversationKeyRef.current === target.key) setRunningConversationKey(null)
-      if (envelope.run.status === 'completed') scheduleNextQueuedPrompt(target.key)
+      finishRunTarget(target)
     }
   }
 
@@ -708,7 +775,7 @@ export function App() {
     const workspace = activeSessionWorkspace
     const currentSessionId = sessionIdRef.current
     if (!workspace || workspace.kind !== 'scratch' || !currentSessionId) return
-    if (runningConversationKeyRef.current) {
+    if ([...activeRunTargetsRef.current.values()].some(target => target.key === activeConversationKeyRef.current)) {
       addStatus('warning', 'Wait for the current run to finish before saving this workspace as a project.')
       return
     }
@@ -758,41 +825,54 @@ export function App() {
     const scope = activeScopeRef.current
     const runProject = scope === 'chat' ? chatWorkspaceRootRef.current : activeProjectRef.current
     if ((!prompt && attachments.length === 0) || !runProject) return
-    const existingRunKey = runningConversationKeyRef.current
-    if (existingRunKey) {
-      if (existingRunKey === activeConversationKeyRef.current && queueingEnabled) {
-        queuePrompt(prompt)
-        return
+
+    let requestedSessionId = sessionIdRef.current
+    let bootstrap: {
+      promise: Promise<string>
+      resolve: (sessionId: string) => void
+      reject: (error: unknown) => void
+    } | null = null
+    if (!requestedSessionId) {
+      if (sessionBootstrapRef.current) {
+        try {
+          requestedSessionId = await sessionBootstrapRef.current
+        } catch (error) {
+          addStatus('error', 'Could not create the session', errorMessage(error))
+          return
+        }
+      } else {
+        let resolveBootstrap!: (sessionId: string) => void
+        let rejectBootstrap!: (error: unknown) => void
+        const promise = new Promise<string>((resolve, reject) => {
+          resolveBootstrap = resolve
+          rejectBootstrap = reject
+        })
+        bootstrap = { promise, resolve: resolveBootstrap, reject: rejectBootstrap }
+        sessionBootstrapRef.current = promise
       }
-      addMessage('error', 'Another session is still generating. Switch back to that session to stop it, or wait for it to finish.')
-      return
     }
 
-    const target: RunConversationTarget = {
-      key: activeConversationKeyRef.current,
-      projectPath: runProject,
+    const target = createRunTarget(
       scope,
-    }
-    const startsNewSession = sessionIdRef.current === null
+      runProject,
+      requestedSessionId
+        ? conversationKey(scope, runProject, requestedSessionId)
+        : activeConversationKeyRef.current,
+    )
+    const startsNewSession = requestedSessionId === null
 
     const composerStartRect = conversation.length === 0 ? composerRef.current?.getBoundingClientRect() : null
     const beginRun = () => {
-      setRunningConversationKey(target.key)
-      currentAssistantRef.current = null
-      currentAssistantTextRef.current = ''
-      currentActivityRef.current = null
-      currentToolRef.current = null
-      currentUserMessageByTargetRef.current.delete(target.key)
+      registerRunTarget(target)
       setQueueStatus('')
       setQueueingEnabled(true)
       setDraftValue('')
       setComposerAnnotationsValue([])
       setComposerAttachmentsValue([])
-      setPendingApproval(null)
       startRunProgress()
       const userMessageId = addMessage('user', displayPrompt, target.key, annotations, attachments)
-      if (userMessageId) currentUserMessageByTargetRef.current.set(target.key, userMessageId)
-      startActivityStream(target.key)
+      if (userMessageId) target.userMessageId = userMessageId
+      startActivityStream(target)
     }
 
     if (composerStartRect) {
@@ -802,13 +882,11 @@ export function App() {
       beginRun()
     }
 
-    let completed = false
-    let failed = false
     try {
       await streamRun({
         prompt,
         attachments: attachments.length ? attachments.map(attachmentForRequest) : undefined,
-        sessionId: sessionIdRef.current || undefined,
+        sessionId: requestedSessionId || undefined,
         permissionMode: permissionModeRef.current,
         context: {
           workspaceRoot: runProject,
@@ -816,36 +894,40 @@ export function App() {
           ...(scope === 'chat' ? { chatMode: true } : {}),
         },
       }, started => {
-        backgroundRunsRef.current.set(started.sessionId, started.run)
+        bindRunTarget(target, started.run)
+        locallyStreamedRunIdsRef.current.add(started.runId)
         migrateRunTarget(target, started.sessionId)
+        bootstrap?.resolve(started.sessionId)
         if (startsNewSession) showStartedSession(runProject, started.sessionId, displayPrompt || prompt || 'Image request')
       }, envelope => {
-        if (envelope.output?.type === 'done') completed = !envelope.output.cancelled
-        if (envelope.output?.type === 'error') failed = true
-        receiveBackgroundEnvelope(envelope)
+        receiveBackgroundEnvelope(envelope, target)
       })
       await loadSessions(runProject)
     } catch (error) {
-      failed = true
+      bootstrap?.reject(error)
       const message = errorMessage(error)
-      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run failed', status: 'error', summary: message }), target.key)
+      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run failed', status: 'error', summary: message }), target)
       finishRunProgress('error')
       addStatus('error', 'Run failed', message, target.key)
-      updateCurrentUserMessageEditability(target.key, true)
-      if (isActiveConversationTarget(target.key)) setPendingApproval(null)
+      updateCurrentUserMessageEditability(target, true)
     } finally {
-      currentAssistantRef.current = null
-      currentAssistantTextRef.current = ''
-      if (runningConversationKeyRef.current === target.key) setRunningConversationKey(null)
-      if (completed && !failed) scheduleNextQueuedPrompt(target.key)
+      if (target.runId) locallyStreamedRunIdsRef.current.delete(target.runId)
+      finishRunTarget(target)
+      if (bootstrap && sessionBootstrapRef.current === bootstrap.promise) sessionBootstrapRef.current = null
     }
   }
 
   async function cancelRun() {
-    const run = sessionIdRef.current ? backgroundRunsRef.current.get(sessionIdRef.current) : undefined
-    await postJson('/api/cancel', run ? { runId: run.id } : {})
-    addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Stop requested', status: 'error' }))
-    addStatus('warning', 'Stop requested')
+    const targets = [...activeRunTargetsRef.current.values()]
+      .filter(target => target.key === activeConversationKeyRef.current && target.runId)
+    await Promise.all(targets.map(async target => {
+      await postJson('/api/cancel', { runId: target.runId })
+      addActivity(
+        formatActivity({ type: 'run_state', kind: 'error', label: 'Stop requested', status: 'error' }),
+        target,
+      )
+    }))
+    if (targets.length > 0) addStatus('warning', targets.length === 1 ? 'Stop requested' : `Stopping ${targets.length} tasks`)
   }
 
   /** Keeps follow-ups in FIFO order, matching the single active-run model. */
@@ -901,102 +983,92 @@ export function App() {
       return
     }
     if (output.type === 'approval_request') {
-      approvalRequestsRef.current.set(output.request.id, output.request)
-      addActivity(formatActivity({ type: 'approval_request', request: output.request }), target.key)
+      approvalRequestsRef.current.set(output.request.id, { request: output.request, target })
+      addActivity(formatActivity({ type: 'approval_request', request: output.request }), target)
       setRunProgressStep('approval')
       addApprovalSource(output.request)
-      if (isActiveConversationTarget(target.key)) {
-        setPendingApproval({
-          request: output.request,
-          status: 'Waiting for approval',
-          disabled: false,
-        })
-      }
+      refreshVisibleApproval()
       return
     }
     if (output.type === 'approval_response') {
-      const request = approvalRequestsRef.current.get(output.id)
+      const entry = approvalRequestsRef.current.get(output.id)
       approvalRequestsRef.current.delete(output.id)
-      if (isActiveConversationTarget(target.key)) {
-        setPendingApproval(current => current?.request.id === output.id ? null : current)
-      }
-      addActivity(formatActivity({ type: 'approval_response', choice: output.choice }), target.key)
+      refreshVisibleApproval()
+      addActivity(formatActivity({ type: 'approval_response', choice: output.choice }), target)
       if (output.choice === 'reject_once') {
         finishRunProgress('error')
       } else {
-        if (request) addApprovedFileOutput(request)
+        if (entry) addApprovedFileOutput(entry.request)
       }
       return
     }
     if (output.type === 'done') {
       if (output.sessionId) migrateRunTarget(target, output.sessionId)
       if (isActiveConversationTarget(target.key)) setSessionId(output.sessionId || sessionIdRef.current)
-      updateCurrentUserMessageEditability(target.key, Boolean(output.cancelled))
+      updateCurrentUserMessageEditability(target, Boolean(output.cancelled))
       addActivity(formatActivity({
         type: 'run_state',
         kind: output.cancelled ? 'error' : 'done',
         label: output.cancelled ? 'Run cancelled' : 'Run finished',
         status: output.cancelled ? 'error' : 'done',
-      }), target.key)
+      }), target)
       finishRunProgress(output.cancelled ? 'error' : 'done')
       addStatus(output.cancelled ? 'warning' : 'success', output.cancelled ? 'Run stopped' : 'Run finished', '', target.key)
-      if (isActiveConversationTarget(target.key)) setPendingApproval(null)
       if (target.scope === 'project' && !output.cancelled) void loadDailyChangelogs(target.projectPath)
       return
     }
     if (output.type === 'error') {
-      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run failed', status: 'error', summary: output.error }), target.key)
+      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run failed', status: 'error', summary: output.error }), target)
       finishRunProgress('error')
       addStatus('error', 'Run failed', output.error, target.key)
-      if (isActiveConversationTarget(target.key)) setPendingApproval(null)
       return
     }
-    handleAgentEvent(output.event, target.key)
+    handleAgentEvent(output.event, target)
   }
 
-  function handleAgentEvent(event: AgentEvent, targetKey = activeConversationKeyRef.current) {
-    if (event.type === 'assistant_delta') appendAssistant(event.text, targetKey)
-    if (event.type === 'assistant_text') setAssistant(event.text, targetKey)
-    if (event.type === 'assistant_attachment') addAssistantAttachment(event.attachment, targetKey)
+  function handleAgentEvent(event: AgentEvent, target: RunConversationTarget) {
+    if (event.type === 'assistant_delta') appendAssistant(event.text, target)
+    if (event.type === 'assistant_text') setAssistant(event.text, target)
+    if (event.type === 'assistant_attachment') addAssistantAttachment(event.attachment, target)
     if (event.type === 'turn_start') {
       setRunProgressStep('think')
-      addActivity(formatActivity({ type: 'run_state', kind: 'thinking', label: 'Thinking', status: 'running' }), targetKey)
+      addActivity(formatActivity({ type: 'run_state', kind: 'thinking', label: 'Thinking', status: 'running' }), target)
     }
     if (event.type === 'tool_start') {
-      if (!isActiveConversationTarget(targetKey)) return
-      freezeAssistantProgressNote(targetKey)
+      if (!isActiveConversationTarget(target.key)) return
+      freezeAssistantProgressNote(target)
       const args = asRecord(event.args)
-      currentToolRef.current = { name: event.name, args }
+      target.currentTool = { name: event.name, args }
       setRunProgressStep('work')
-      addActivity(formatActivity({ type: 'tool_start', name: event.name, args }), targetKey)
+      addActivity(formatActivity({ type: 'tool_start', name: event.name, args }), target)
     }
     if (event.type === 'tool_result') {
-      recordChangedFile(event.name, event.ok, event.content, targetKey)
-      recordCommandResult(event.name, event.ok, event.content, targetKey)
+      recordChangedFile(event.name, event.ok, event.content, target)
+      recordCommandResult(event.name, event.ok, event.content, target)
       setRunProgressStep('outputs')
-      updateLatestActivity(formatActivity({ type: 'tool_result', name: event.name, ok: event.ok, content: event.content }), targetKey)
+      updateLatestActivity(formatActivity({ type: 'tool_result', name: event.name, ok: event.ok, content: event.content }), target)
     }
     if (event.type === 'error') {
       const reason = String(event.reason || 'Unknown error')
-      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run failed', status: 'error', summary: reason }), targetKey)
+      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run failed', status: 'error', summary: reason }), target)
       finishRunProgress('error')
-      addStatus('error', 'Run failed', reason, targetKey)
+      addStatus('error', 'Run failed', reason, target.key)
     }
     if (event.type === 'max_turns') {
-      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run paused', status: 'error', summary: 'Reached the turn limit.' }), targetKey)
+      addActivity(formatActivity({ type: 'run_state', kind: 'error', label: 'Run paused', status: 'error', summary: 'Reached the turn limit.' }), target)
     }
   }
 
   async function submitApproval(request: ApprovalRequest, choice: ApprovalChoice) {
-    const targetKey = activeConversationKeyRef.current
-    if (!isActiveConversationTarget(targetKey)) return
+    const entry = approvalRequestsRef.current.get(request.id)
+    if (!entry || !entry.target.runId || !isActiveConversationTarget(entry.target.key)) return
     setPendingApproval(current => current?.request.id === request.id
       ? { ...current, status: `Submitting: ${labelChoice(choice)}`, disabled: true, error: undefined }
       : current)
     try {
-      const run = sessionIdRef.current ? backgroundRunsRef.current.get(sessionIdRef.current) : undefined
-      await postJson('/api/approval', { id: request.id, choice, ...(run ? { runId: run.id } : {}) })
-      setPendingApproval(current => current?.request.id === request.id ? null : current)
+      await postJson('/api/approval', { id: request.id, choice, runId: entry.target.runId })
+      approvalRequestsRef.current.delete(request.id)
+      refreshVisibleApproval()
     } catch (error) {
       setPendingApproval(current => current?.request.id === request.id
         ? { ...current, status: 'Waiting for approval', disabled: false, error: `Could not submit approval: ${errorMessage(error)}` }
@@ -1017,11 +1089,11 @@ export function App() {
     return message.id
   }
 
-  function updateCurrentUserMessageEditability(targetKey: string, canEdit: boolean) {
-    if (!isActiveConversationTarget(targetKey)) return
-    const messageId = currentUserMessageByTargetRef.current.get(targetKey)
+  function updateCurrentUserMessageEditability(target: RunConversationTarget, canEdit: boolean) {
+    if (!isActiveConversationTarget(target.key)) return
+    const messageId = target.userMessageId
     if (!messageId) return
-    currentUserMessageByTargetRef.current.delete(targetKey)
+    target.userMessageId = undefined
     setConversation(current => current.map(item => item.type === 'message' && item.id === messageId
       ? { ...item, canEdit: canEdit || undefined }
       : item))
@@ -1065,17 +1137,17 @@ export function App() {
     setShowRunProgress(true)
   }
 
-  function startActivityStream(targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
+  function startActivityStream(target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
     const id = nextItemId('activity')
-    currentActivityRef.current = id
+    target.activityId = id
     setConversation(current => [...current, { id, type: 'activity', items: [] }])
   }
 
-  function addActivity(activity: ActivityInput, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    if (!currentActivityRef.current) startActivityStream(targetKey)
-    const streamId = currentActivityRef.current
+  function addActivity(activity: ActivityInput, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    if (!target.activityId) startActivityStream(target)
+    const streamId = target.activityId
     if (!streamId) return
     const nextActivity: ActivityItem = {
       id: nextItemId('activity-event'),
@@ -1092,9 +1164,9 @@ export function App() {
       : item))
   }
 
-  function updateLatestActivity(activity: ActivityInput, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    const streamId = currentActivityRef.current
+  function updateLatestActivity(activity: ActivityInput, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    const streamId = target.activityId
     if (!streamId) return
     setConversation(current => current.map(item => {
       if (item.id !== streamId || item.type !== 'activity' || item.items.length === 0) return item
@@ -1112,56 +1184,56 @@ export function App() {
     }))
   }
 
-  function freezeAssistantProgressNote(targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    if (!currentAssistantRef.current || !currentAssistantTextRef.current.trim()) return
-    currentAssistantRef.current = null
-    currentAssistantTextRef.current = ''
+  function freezeAssistantProgressNote(target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    if (!target.assistantId || !target.assistantText.trim()) return
+    target.assistantId = null
+    target.assistantText = ''
   }
 
-  function appendAssistant(text: string, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    if (!currentAssistantRef.current) {
+  function appendAssistant(text: string, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    if (!target.assistantId) {
       const id = nextItemId('assistant')
-      currentAssistantRef.current = id
-      currentAssistantTextRef.current = text || ''
+      target.assistantId = id
+      target.assistantText = text || ''
       setConversation(current => [...current, createMessageItem('assistant', text || '', undefined, id)])
       return
     }
-    const assistantId = currentAssistantRef.current
-    currentAssistantTextRef.current += text || ''
+    const assistantId = target.assistantId
+    target.assistantText += text || ''
     setConversation(current => current.map(item => item.id === assistantId && item.type === 'message'
       ? { ...item, text: item.text + (text || '') }
       : item))
   }
 
-  function setAssistant(text: string, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    if (!currentAssistantRef.current) {
+  function setAssistant(text: string, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    if (!target.assistantId) {
       const id = nextItemId('assistant')
-      currentAssistantRef.current = id
-      currentAssistantTextRef.current = text || ''
+      target.assistantId = id
+      target.assistantText = text || ''
       setConversation(current => [...current, createMessageItem('assistant', text || '', undefined, id)])
       return
     }
-    const assistantId = currentAssistantRef.current
-    currentAssistantTextRef.current = text || ''
+    const assistantId = target.assistantId
+    target.assistantText = text || ''
     setConversation(current => current.map(item => item.id === assistantId && item.type === 'message'
       ? { ...item, text: text || '' }
       : item))
   }
 
-  function addAssistantAttachment(attachment: ImageAttachment, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    if (!currentAssistantRef.current) {
+  function addAssistantAttachment(attachment: ImageAttachment, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    if (!target.assistantId) {
       const id = nextItemId('assistant')
-      currentAssistantRef.current = id
-      currentAssistantTextRef.current = ''
+      target.assistantId = id
+      target.assistantText = ''
       setConversation(current => [...current, createMessageItem('assistant', '', undefined, id, [], [attachment])])
       return
     }
 
-    const assistantId = currentAssistantRef.current
+    const assistantId = target.assistantId
     setConversation(current => current.map(item => {
       if (item.id !== assistantId || item.type !== 'message') return item
       if ((item.attachments ?? []).some(candidate => sameAttachment(candidate, attachment))) return item
@@ -1169,9 +1241,9 @@ export function App() {
     }))
   }
 
-  function recordChangedFile(name: string, ok: boolean, content: string, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    const currentTool = currentToolRef.current
+  function recordChangedFile(name: string, ok: boolean, content: string, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    const currentTool = target.currentTool
     if (!ok || !currentTool || currentTool.name !== name) return
     if (name !== 'write_file' && name !== 'edit_file') return
     if (content.toLowerCase().includes('no actual change')) return
@@ -1182,9 +1254,9 @@ export function App() {
     }
   }
 
-  function recordCommandResult(name: string, ok: boolean, content: string, targetKey = activeConversationKeyRef.current) {
-    if (!isActiveConversationTarget(targetKey)) return
-    const currentTool = currentToolRef.current
+  function recordCommandResult(name: string, ok: boolean, content: string, target: RunConversationTarget) {
+    if (!isActiveConversationTarget(target.key)) return
+    const currentTool = target.currentTool
     if (!currentTool || currentTool.name !== name) return
     if (name !== 'run_command' && name !== 'run_background_command') return
     const command = stringArg(currentTool.args.command, name)
@@ -1265,16 +1337,11 @@ export function App() {
 
     const previousKey = target.key
     target.key = nextKey
-    const currentUserMessageId = currentUserMessageByTargetRef.current.get(previousKey)
-    if (currentUserMessageId) {
-      currentUserMessageByTargetRef.current.delete(previousKey)
-      currentUserMessageByTargetRef.current.set(nextKey, currentUserMessageId)
-    }
     if (activeConversationKeyRef.current === previousKey || activeConversationKeyRef.current === nextKey) {
       setActiveConversationKey(nextKey)
       setSessionId(sessionId)
     }
-    if (runningConversationKeyRef.current === previousKey) setRunningConversationKey(nextKey)
+    setActiveRunRevision(value => value + 1)
   }
 
   function isActiveConversationTarget(targetKey: string): boolean {
@@ -1292,10 +1359,6 @@ export function App() {
   }
 
   function editMessage(item: Extract<ConversationItem, { type: 'message' }>) {
-    if (runningConversationKeyRef.current) {
-      queuePrompt(item.text)
-      return
-    }
     setDraftValue(item.text)
     setComposerAnnotationsValue(item.annotations ?? [])
     setComposerAttachmentsValue(editableComposerAttachments(item.attachments))

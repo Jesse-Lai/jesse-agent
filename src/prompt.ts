@@ -18,9 +18,15 @@ import type { SkillsContext } from './skills.js'
 import type { McpPromptContext } from './mcp.js'
 import type { PlanModeContext } from './planMode.js'
 import { formatAgentManifest } from './agents.js'
-import { getPermissionMode, permissionModeDescription, permissionModeTitle } from './permissionMode.js'
-import { formatWorktreePromptContext } from './worktrees.js'
+import { getPermissionMode, permissionModeDescription, permissionModeTitle, type PermissionMode } from './permissionMode.js'
+import { formatWorktreePromptContext, type WorktreeSession } from './worktrees.js'
 import { getProjectRoot } from './workingDirectory.js'
+
+export interface SystemPromptRuntimeContext {
+  permissionMode?: PermissionMode
+  projectRoot?: string
+  worktreeSession?: WorktreeSession | null
+}
 
 // ============================================================================
 // 一、各个 section（每段一个函数，带 # 标题，方便日后逐段生长）
@@ -131,7 +137,7 @@ function gitAndVerificationSection(): string {
 }
 
 /** ⑧ Worktree 隔离：风险/并行工作时保护主工作区。 */
-function worktreeSection(): string {
+function worktreeSection(session?: WorktreeSession | null): string {
   return `# Worktree 隔离
 - enter_worktree 会创建隔离 git worktree，并把当前 session 切换进去；exit_worktree 用于退出并选择 keep 或 remove。
 - 不要因为普通 bugfix 或普通功能开发就主动进入 worktree。只有用户明确要求 worktree，或你认为任务风险/并行度需要隔离时，先向用户说明原因并得到同意。
@@ -140,7 +146,7 @@ function worktreeSection(): string {
 
 当前 worktree 状态：
 <worktree-context>
-${formatWorktreePromptContext()}
+${formatWorktreePromptContext(session)}
 </worktree-context>`
 }
 
@@ -216,10 +222,10 @@ ${manifest}
 }
 
 /** ⑫ 权限模式：告诉模型当前工具自由度。对应 Claude Code 的 PermissionMode。 */
-function permissionModeSection(): string {
+function permissionModeSection(mode: PermissionMode): string {
   return `# 当前权限模式
-- 当前模式：${permissionModeTitle(getPermissionMode())}
-- 含义：${permissionModeDescription(getPermissionMode())}
+- 当前模式：${permissionModeTitle(mode)}
+- 含义：${permissionModeDescription(mode)}
 - default：正常权限规则。
 - plan：只允许读取、搜索、运行只读 Bash；不要尝试写文件或执行危险命令。
 - acceptEdits：文件编辑会自动允许；Bash 仍然按权限规则处理。
@@ -227,9 +233,9 @@ function permissionModeSection(): string {
 }
 
 /** ⑬ Plan Mode 工作流：只读计划 → exit_plan_mode 审批 → 执行。 */
-function planModeWorkflowSection(plan: PlanModeContext | null): string {
+function planModeWorkflowSection(plan: PlanModeContext | null, mode: PermissionMode): string {
   const planPath = plan?.planFilePath ?? '(plan file unavailable until session starts)'
-  const active = getPermissionMode() === 'plan'
+  const active = mode === 'plan'
 
   if (!active) {
     return `# Plan Mode 工作流
@@ -261,9 +267,9 @@ function toneSection(): string {
  * 所以按"静态在前、动态在后"的惯例放最后（将来做提示词缓存时，前面静态段
  * 能被缓存，只有这段会变）。
  */
-function envSection(): string {
+function envSection(projectRoot: string): string {
   return `# 当前环境
-- 工作目录：${getProjectRoot()}
+- 工作目录：${projectRoot}
 - 操作系统：${prettyPlatform()}
 - 今天日期：${localDate()}`
 }
@@ -284,7 +290,10 @@ export function buildSystemPrompt(
   skills: SkillsContext | null = null,
   mcp: McpPromptContext | null = null,
   plan: PlanModeContext | null = null,
+  runtime: SystemPromptRuntimeContext = {},
 ): string {
+  const permissionMode = runtime.permissionMode ?? getPermissionMode()
+  const projectRoot = runtime.projectRoot ?? getProjectRoot()
   const staticSections = [
     introSection(),
     systemSection(),
@@ -295,7 +304,7 @@ export function buildSystemPrompt(
     implementationTraceSection(),
     subAgentsSection(),
     gitAndVerificationSection(),
-    worktreeSection(),
+    worktreeSection(runtime.worktreeSession),
     toneSection(),
   ]
   // === 静态 / 动态 分界（对应 Claude Code 的 BOUNDARY MARKER）===
@@ -303,9 +312,9 @@ export function buildSystemPrompt(
     projectMemorySection(memory),
     skillsSection(skills),
     mcpSection(mcp),
-    permissionModeSection(),
-    planModeWorkflowSection(plan),
-    envSection(),
+    permissionModeSection(permissionMode),
+    planModeWorkflowSection(plan, permissionMode),
+    envSection(projectRoot),
   ]
 
   // 段与段之间空一行，读起来清爽，模型也好分辨章节。

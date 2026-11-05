@@ -27,8 +27,8 @@ export const enterWorktreeTool: Tool = {
 
   isReadOnly: false,
 
-  async execute(args) {
-    const session = await enterWorktree({ name: args.name })
+  async execute(args, context) {
+    const session = await enterWorktree({ name: args.name }, context)
     return formatWorktreeEntered(session)
   },
 }

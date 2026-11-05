@@ -1,21 +1,35 @@
 import AppKit
 import OSLog
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class CompanionPanel: NSPanel {
     var allowsKeyboardFocus = false
+    var pasteboardProvider: () -> NSPasteboard = { .general }
+    var imagePasteHandler: ((String) -> Bool)?
 
     override var canBecomeKey: Bool { allowsKeyboardFocus }
     override var canBecomeMain: Bool { false }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Accessory apps do not have a normal Edit menu, so AppKit has no
-        // key-equivalent route for Command-V. Forward paste directly to the
-        // focused SwiftUI field editor while this panel owns keyboard focus.
-        if allowsKeyboardFocus,
-           Self.isPasteShortcut(event),
-           firstResponder?.tryToPerform(#selector(NSText.paste(_:)), with: self) == true {
-            return true
+        // key-equivalent route for Command-V. Capture clipboard images as
+        // composer attachments, then let the focused field editor handle text.
+        if allowsKeyboardFocus, Self.isPasteShortcut(event) {
+            if let imagePasteHandler {
+                do {
+                    if let dataURL = try CompanionClipboardImage.dataURL(from: pasteboardProvider()),
+                       imagePasteHandler(dataURL) {
+                        return true
+                    }
+                } catch {
+                    NSSound.beep()
+                    return true
+                }
+            }
+            if firstResponder?.tryToPerform(#selector(NSText.paste(_:)), with: self) == true {
+                return true
+            }
         }
         return super.performKeyEquivalent(with: event)
     }
@@ -26,6 +40,56 @@ final class CompanionPanel: NSPanel {
             return false
         }
         return event.charactersIgnoringModifiers?.lowercased() == "v"
+    }
+}
+
+enum CompanionClipboardImage {
+    static func dataURL(from pasteboard: NSPasteboard) throws -> String? {
+        let fileURLs = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        )?.compactMap { ($0 as? NSURL).map { $0 as URL } } ?? []
+        if let fileURL = fileURLs.first {
+            let mimeType: String
+            switch fileURL.pathExtension.lowercased() {
+            case "png": mimeType = "image/png"
+            case "jpg", "jpeg": mimeType = "image/jpeg"
+            case "webp": mimeType = "image/webp"
+            default: throw ImageAttachmentError.unsupported
+            }
+            return try validatedDataURL(
+                data: Data(contentsOf: fileURL, options: .mappedIfSafe),
+                mimeType: mimeType,
+                name: fileURL.lastPathComponent
+            )
+        }
+
+        let directTypes: [(NSPasteboard.PasteboardType, String, String)] = [
+            (.init(UTType.png.identifier), "image/png", "Pasted Image.png"),
+            (.init(UTType.jpeg.identifier), "image/jpeg", "Pasted Image.jpg"),
+            (.init(UTType.webP.identifier), "image/webp", "Pasted Image.webp"),
+        ]
+        for (type, mimeType, name) in directTypes {
+            guard let data = pasteboard.data(forType: type) else { continue }
+            return try validatedDataURL(data: data, mimeType: mimeType, name: name)
+        }
+
+        if let tiff = pasteboard.data(forType: .tiff),
+           let representation = NSBitmapImageRep(data: tiff),
+           let png = representation.representation(using: .png, properties: [:]) {
+            return try validatedDataURL(data: png, mimeType: "image/png", name: "Pasted Image.png")
+        }
+        return nil
+    }
+
+    private static func validatedDataURL(data: Data, mimeType: String, name: String) throws -> String {
+        let attachments = try ImageAttachmentValidator.appending(
+            data: data,
+            mimeType: mimeType,
+            name: name,
+            to: []
+        )
+        return attachments[0].dataURL
     }
 }
 
@@ -60,7 +124,8 @@ final class RingWindowController: NSObject {
     private var presentationPoint = NSPoint.zero
     private var pendingScreenshotDataURL: String?
     private var panelDragStartFrame: NSRect?
-    private var agentRunStreamTask: Task<Void, Never>?
+    private var agentRunStreamTasks: [String: Task<Void, Never>] = [:]
+    private var agentSessionBootstrap: (id: UUID, task: Task<DoAnythingStartResponse, Error>)?
     private var agentImageTargetContext: CapturedContext?
 
     var isVisible: Bool { panel.isVisible && ringDismissTask == nil }
@@ -91,6 +156,9 @@ final class RingWindowController: NSObject {
 
         viewModel.commandHandler = { [weak self] command in
             self?.handle(command)
+        }
+        panel.imagePasteHandler = { [weak self] dataURL in
+            self?.attachPastedImage(dataURL) ?? false
         }
 
         hostingView.frame = NSRect(origin: .zero, size: RingGeometry.panelSize)
@@ -132,8 +200,10 @@ final class RingWindowController: NSObject {
         // A hidden panel must not cancel the server-side Agent run. When a new
         // shortcut presentation begins, only detach the old local SSE observer
         // so its late events cannot overwrite the new draft/session UI.
-        agentRunStreamTask?.cancel()
-        agentRunStreamTask = nil
+        for task in agentRunStreamTasks.values { task.cancel() }
+        agentRunStreamTasks.removeAll()
+        agentSessionBootstrap?.task.cancel()
+        agentSessionBootstrap = nil
         hostingView.alphaValue = 0
         pendingScreenshotDataURL = nil
         agentImageTargetContext = nil
@@ -246,20 +316,20 @@ final class RingWindowController: NSObject {
             }
         case .writeBackAgentImage(let messageID, let dataURL):
             writeBackAgentImage(messageID: messageID, dataURL: dataURL)
-        case .approveAgentRun(let id, let choice):
+        case .approveAgentRun(let runID, let id, let choice):
             Task {
                 do {
-                    try await agentClient.submitApproval(id: id, choice: choice)
+                    try await agentClient.submitApproval(id: id, choice: choice, runID: runID)
                 } catch {
-                    viewModel.failAgentTurn(error.localizedDescription)
+                    viewModel.failAgentTurn(error.localizedDescription, runKey: runID)
                 }
             }
-        case .cancelAgentRun:
+        case .cancelAgentRun(let runID):
             Task {
                 do {
-                    try await agentClient.cancelAgentRun()
+                    try await agentClient.cancelAgentRun(runID: runID)
                 } catch {
-                    viewModel.failAgentTurn(error.localizedDescription)
+                    viewModel.failAgentTurn(error.localizedDescription, runKey: runID)
                 }
             }
         case .openAgentSession:
@@ -310,44 +380,75 @@ final class RingWindowController: NSObject {
             agentImageTargetContext = capturedContext
         }
         let includeSource = viewModel.isSourceContextAttached
-        viewModel.beginAgentTurn(
+        let localRunID = viewModel.beginAgentTurn(
             prompt: prompt,
             imageDataURL: imageDataURL,
             startsNewSession: startsNewSession
         )
-        let request = DoAnythingRequest(
-            prompt: prompt,
-            sessionId: existingSessionID,
-            permissionMode: "default",
-            context: DoAnythingSourceContext(
-                sourceApp: includeSource ? capturedContext.sourceAppName : nil,
-                sourceBundleIdentifier: includeSource ? capturedContext.sourceBundleIdentifier : nil,
-                sourceURL: includeSource ? capturedContext.sourceURL : nil,
-                sourceTitle: includeSource ? capturedContext.sourcePageTitle : nil,
-                selectedText: includeSource ? capturedContext.selectedText : nil
-            ),
-            attachments: imageDataURL.map { [DoAnythingImageAttachment(dataURL: $0)] }
-        )
+        let makeRequest: (String?) -> DoAnythingRequest = { sessionID in
+            DoAnythingRequest(
+                prompt: prompt,
+                sessionId: sessionID,
+                permissionMode: "default",
+                context: DoAnythingSourceContext(
+                    sourceApp: includeSource ? self.capturedContext.sourceAppName : nil,
+                    sourceBundleIdentifier: includeSource ? self.capturedContext.sourceBundleIdentifier : nil,
+                    sourceURL: includeSource ? self.capturedContext.sourceURL : nil,
+                    sourceTitle: includeSource ? self.capturedContext.sourcePageTitle : nil,
+                    selectedText: includeSource ? self.capturedContext.selectedText : nil
+                ),
+                attachments: imageDataURL.map { [DoAnythingImageAttachment(dataURL: $0)] }
+            )
+        }
 
-        agentRunStreamTask = Task { @MainActor [weak self] in
+        let startTask: Task<DoAnythingStartResponse, Error>
+        let bootstrapID: UUID?
+        if let existingSessionID {
+            startTask = Task { try await agentClient.startDoAnything(makeRequest(existingSessionID)) }
+            bootstrapID = nil
+        } else if let bootstrap = agentSessionBootstrap {
+            startTask = Task {
+                let first = try await bootstrap.task.value
+                return try await self.agentClient.startDoAnything(makeRequest(first.sessionId))
+            }
+            bootstrapID = nil
+        } else {
+            let id = UUID()
+            let task = Task { try await agentClient.startDoAnything(makeRequest(nil)) }
+            agentSessionBootstrap = (id, task)
+            startTask = task
+            bootstrapID = id
+        }
+
+        let streamTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.agentRunStreamTasks[localRunID] = nil }
             do {
-                let response = try await self.agentClient.startDoAnything(request)
-                self.viewModel.attachAgentRun(response.run)
+                let response = try await startTask.value
+                guard !Task.isCancelled,
+                      self.viewModel.agentSession?.runs.contains(where: { $0.id == localRunID }) == true else { return }
+                if let bootstrapID, self.agentSessionBootstrap?.id == bootstrapID {
+                    self.agentSessionBootstrap = nil
+                }
+                self.viewModel.attachAgentRun(response.run, localRunID: localRunID)
                 for try await envelope in self.agentClient.streamAgentRun(
                     runID: response.runId,
                     after: max(0, response.cursor - 1)
                 ) {
-                    guard self.viewModel.agentSession?.runID == response.runId else { continue }
+                    guard self.viewModel.agentSession?.runs.contains(where: { $0.runID == response.runId }) == true else { continue }
                     self.viewModel.applyAgentRunEnvelope(envelope)
                 }
             } catch is CancellationError {
                 return
             } catch {
                 self.viewModel.askDraft = prompt
-                self.viewModel.failAgentTurn(error.localizedDescription)
+                self.viewModel.failAgentTurn(error.localizedDescription, runKey: localRunID)
+                if let bootstrapID, self.agentSessionBootstrap?.id == bootstrapID {
+                    self.agentSessionBootstrap = nil
+                }
             }
         }
+        agentRunStreamTasks[localRunID] = streamTask
     }
 
     private func select(_ action: CompanionAction) {
@@ -380,6 +481,17 @@ final class RingWindowController: NSObject {
         case .polish, .translate:
             runQuickTask(action: action, instruction: nil, imageDataURL: nil)
         }
+    }
+
+    private func attachPastedImage(_ dataURL: String) -> Bool {
+        guard currentSurface == .ask else { return false }
+        pendingScreenshotDataURL = dataURL
+        viewModel.setComposerAttachment(CompanionComposerAttachment(
+            imageDataURL: dataURL,
+            sourceApp: viewModel.language.text("剪贴板", "Clipboard")
+        ))
+        activateFocus(.askEditor)
+        return true
     }
 
     private func summarizeCurrentContent() async {
